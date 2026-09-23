@@ -1,0 +1,2610 @@
+/* SewaAstra Admin — सारा JavaScript, मूल क्रम में (18 ब्लॉक)
+
+   ⚠️ क्रम मत बदलिए. सबसे ऊपर security shims (SWXSS/SWID) हैं — वे
+      innerHTML जैसे setters को लपेटकर XSS रोकते हैं. अगर उन्हें नीचे
+      खिसकाया या हटाया, तो नीचे का सारा code बिना पहरे के चलेगा.
+
+   हर ब्लॉक अपने try/catch में है ताकि एक जगह की गड़बड़ बाक़ी ऐप को न ले डूबे.
+   कोई ब्लॉक गिरे तो console में साफ़ लिखा आएगा, और window.__SW_ERRORS में
+   उसकी गिनती मिल जाएगी.
+
+   (18/18 ब्लॉक लपेटे गए; 0 जान-बूझकर छोड़े गए — कारण वहीं लिखा है.
+    जाँच: acorn)
+*/
+
+/* ═══ ब्लॉक 0 ═══ */
+try {
+/* ═══════════════════════════════════════════════════════════════
+   SWXSS — आख़िरी सुरक्षा-जाल (v3)
+   ---------------------------------------------------------------
+   सोच: app में 300 जगह innerHTML है. हर एक पर सही escape लगाना और
+        आगे भी लगा रहना — यह भरोसे की बात है, गारंटी की नहीं.
+        एक जगह छूटी तो वही stored XSS बन जाती है.
+
+        इसलिए escape को *आख़िरी दरवाज़े* पर रखा गया है: innerHTML का
+        setter खुद. कोई भी रास्ता — पुराना कोड, नया कोड, भूली हुई जगह —
+        सब यहीं से गुज़रते हैं.
+
+   ⚠️ यह escape-at-source की जगह नहीं लेता. यह उसके नीचे का जाल है.
+      दोनों साथ चाहिए.
+
+   क्या हटाता है:
+     • <script> <iframe> <object> <embed> <base> <link> <meta> <form>
+       <svg> <math>  — इन apps के किसी template में ये आते ही नहीं,
+       इसलिए हटाने से कुछ नहीं टूटता (जाँचा गया).
+     • href/src/action में javascript: vbscript: data:text/html
+     • on… attribute तभी हटते हैं जब उनमें साफ़ हमला दिखे
+       (apps inline onclick पर टिके हैं — अंधाधुंध हटाना app तोड़ देता)
+   ═══════════════════════════════════════════════════════════════ */
+(function (global) {
+  'use strict';
+  if (global.SWXSS) return;
+
+  // इन apps में ये tag कभी legitimately नहीं बनते
+  var BAD = 'script|iframe|object|embed|base|link|meta|form|svg|math|frame|frameset|applet|template';
+
+  var RE_PAIR = new RegExp('<\\s*(' + BAD + ')\\b[\\s\\S]*?<\\s*\\/\\s*\\1\\s*>', 'gi');
+  var RE_ONE  = new RegExp('<\\s*\\/?\\s*(' + BAD + ')\\b[^>]*>', 'gi');
+
+  // href/src/action में खतरनाक scheme.  data:image और data:video चलने दो.
+  var RE_URL = /(\b(?:href|src|action|formaction|data|poster|xlink:href)\s*=\s*)(["']?)\s*(?:j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t|v\s*b\s*s\s*c\s*r\s*i\s*p\s*t|data\s*:\s*text\s*\/\s*html)\s*:?[^"'>\s]*/gi;
+
+  // ── on… handler ──
+  // ये apps 434 inline onclick पर टिकी हैं, इसलिए सबको हटाना app तोड़ देगा.
+  // इसलिए दो परतें: (क) सिर्फ़ वही handler नाम चलेंगे जो apps सच में
+  // इस्तेमाल करते हैं — onmouseover/onanimationstart/ontoggle जैसे
+  // दर्जनों bypass रास्ते यहीं बंद. (ख) बचे हुए handler में जाना-पहचाना
+  // payload दिखा तो वो भी हटेगा.
+  var OK_ON = { onclick:1, onchange:1, oninput:1, onkeydown:1, onkeyup:1,
+                onerror:1, onload:1, onsubmit:1, onblur:1, onfocus:1 };
+
+  var RE_ON  = /(\s)(on\w+)(\s*=\s*)(["'])((?:(?!\4)[\s\S])*?)\4/gi;
+  var RE_ON2 = /(\s)(on\w+)(\s*=\s*)([^\s"'>]+)/gi;      // बिना quote वाला
+
+  // handler के अंदर ये कभी legitimately नहीं आते
+  var RE_PAYLOAD = new RegExp([
+    '<', 'javascript\\s*:', 'vbscript\\s*:', '&#', '\\\\x3c', '\\\\u003c',
+    // function जैसे — पीछे ( या [ या . चाहिए
+    '\\b(?:alert|prompt|confirm|eval|atob|btoa|unescape|decodeURI|fetch|import|Function|' +
+      'setTimeout|setInterval|XMLHttpRequest|WebSocket|EventSource|Worker|open|write|' +
+      'createElement|appendChild|insertAdjacent|setAttribute)\\s*[\\(\\[]',
+    // ये नाम अकेले ही ख़तरा — कुछ पीछे लगने की ज़रूरत नहीं
+    '\\b(?:document\\s*\\.\\s*cookie|localStorage|sessionStorage|indexedDB|' +
+      'navigator\\s*\\.\\s*sendBeacon|location\\s*\\.\\s*(?:href|replace|assign)|' +
+      'innerHTML|outerHTML|srcdoc|globalThis|constructor)\\b',
+    // bracket से property निकालना — obfuscation का पसंदीदा रास्ता
+    '\\b(?:window|self|top|parent|frames|document|this)\\s*\\['
+  ].join('|'), 'i');
+
+  var blocked = 0;
+
+  function keepHandler(name, val) {
+    if (!OK_ON[String(name).toLowerCase()]) { blocked++; return false; }
+    if (RE_PAYLOAD.test(val)) { blocked++; return false; }
+    return true;
+  }
+
+  function clean(html) {
+    var s = String(html == null ? '' : html);
+    if (s.indexOf('<') < 0 && s.indexOf('&') < 0) return s;   // सादा text — छोड़ो
+
+    var before = s;
+    s = s.replace(RE_PAIR, '').replace(RE_ONE, '');
+    s = s.replace(RE_URL, function (m, p1, q) { blocked++; return p1 + q + '#blocked'; });
+    s = s.replace(RE_ON, function (m, sp, name, eq, q, val) {
+      return keepHandler(name, val) ? m : sp;
+    });
+    s = s.replace(RE_ON2, function (m, sp, name, eq, val) {
+      return keepHandler(name, val) ? m : sp;
+    });
+    if (s !== before) blocked++;
+    return s;
+  }
+
+  function wrapProp(proto, prop) {
+    var d = Object.getOwnPropertyDescriptor(proto, prop);
+    if (!d || !d.set || d.__swxss) return;
+    var orig = d.set;
+    Object.defineProperty(proto, prop, {
+      configurable: true,
+      enumerable: d.enumerable,
+      get: d.get,
+      set: function (v) { orig.call(this, clean(v)); }
+    });
+    Object.getOwnPropertyDescriptor(proto, prop).__swxss = 1;
+  }
+
+  try { wrapProp(Element.prototype, 'innerHTML'); } catch (e) {}
+  try { wrapProp(Element.prototype, 'outerHTML'); } catch (e) {}
+
+  try {
+    var iah = Element.prototype.insertAdjacentHTML;
+    if (iah && !iah.__swxss) {
+      Element.prototype.insertAdjacentHTML = function (pos, html) {
+        return iah.call(this, pos, clean(html));
+      };
+      Element.prototype.insertAdjacentHTML.__swxss = 1;
+    }
+  } catch (e) {}
+
+  /** URL सुरक्षित है? src/href सीधे लगाने से पहले इससे गुज़ारें */
+  function safeUrl(u) {
+    var s = String(u == null ? '' : u).trim();
+    if (!s) return '';
+    if (/^(https?:|\/|\.\/|#|mailto:|tel:)/i.test(s)) return s;
+    if (/^data:(image|video|audio)\//i.test(s)) return s;   // upload preview
+    return '';                                              // बाकी सब बंद
+  }
+
+  /** HTML entity escape — escape-at-source के लिए */
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"'`=\/]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
+               "'": '&#39;', '`': '&#96;', '=': '&#61;', '/': '&#47;' }[c];
+    });
+  }
+
+  global.SWXSS = {
+    clean: clean,
+    esc: esc,
+    safeUrl: safeUrl,
+    blocked: function () { return blocked; }
+  };
+  if (!global.swEsc) global.swEsc = esc;
+})(window);
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 0 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([0, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 1 ═══ */
+try {
+window.__SWID_ROLE = 'admin';
+/* ═══════════════════════════════════════════════════════════════
+   SWID — पहचान की एक ही जगह (v3)
+   ---------------------------------------------------------------
+   समस्या: पूरे app में doc ID के तौर पर फोन नंबर इस्तेमाल हुआ है
+           (partners/9111111111). फोन नंबर बदला जा सकता है, अंदाज़ा
+           लगाया जा सकता है, और recycle होता है — इसलिए वो पहचान
+           का आधार नहीं हो सकता. सही आधार Firebase Auth का uid है.
+
+   हल:    65+ जगह हाथ से बदलने के बजाय Firestore की doc() call को
+          एक बार लपेट देते हैं. सिर्फ *अपना* फोन नंबर चुपचाप अपने
+          uid पर मुड़ता है — किसी और का ID कभी नहीं छुआ जाता.
+
+   खुद ठीक होने वाला: boot पर देखता है कि uid-वाला doc बना है या
+          नहीं. migration के हर चरण में सही जगह पर जाता है, चाहे
+          phase1 चल रहा हो या phase3 हो चुका हो.
+   ═══════════════════════════════════════════════════════════════ */
+(function (global) {
+  'use strict';
+  if (global.SWID) return;
+
+  var KEYED = { partners: 1, users: 1 };   // सिर्फ ये दो collections
+  var _uid = null;                          // Firebase Auth uid
+  var _phone = '';                          // मेरा 10-अंकी नंबर
+  var _docId = '';                          // असल में कौन-सा ID इस्तेमाल हो
+  var _resolved = false;
+  var _waiters = [];
+  var LS = 'swid_docmode_v3';
+
+  function digits10(s) {
+    s = String(s == null ? '' : s).replace(/\D/g, '');
+    return s.length >= 10 ? s.slice(-10) : '';
+  }
+
+  /** मेरा फोन — auth token सबसे भरोसेमंद, localStorage सिर्फ सहारा */
+  function readPhone() {
+    try {
+      var u = global.firebase && firebase.auth().currentUser;
+      if (u && u.phoneNumber) return digits10(u.phoneNumber);
+    } catch (e) {}
+    try {
+      var a = localStorage.getItem('swp_phone') || localStorage.getItem('sw_user') || '';
+      return digits10(a);
+    } catch (e) {}
+    return '';
+  }
+
+  /**
+   * तय करो कि मेरा doc uid पर है या अभी भी फोन पर.
+   * phase2 के बाद uid-doc मौजूद होगा → uid.
+   * उससे पहले → फोन (कुछ नहीं टूटता).
+   */
+  function resolve(FS) {
+    if (_resolved) return Promise.resolve(_docId);
+    _uid = null;
+    try { var u = firebase.auth().currentUser; if (u) _uid = u.uid; } catch (e) {}
+    _phone = readPhone();
+
+    // logged out — कोई redirect नहीं, पर waiters ज़रूर छोड़ो
+    if (!_uid) { _docId = _phone; finish(); return Promise.resolve(_docId); }
+    if (!_phone) { _docId = _uid; finish(); return Promise.resolve(_docId); }
+
+    // पिछली बार का फ़ैसला याद है?
+    try {
+      var c = JSON.parse(localStorage.getItem(LS) || 'null');
+      if (c && c.uid === _uid && c.mode === 'uid') {
+        _docId = _uid; finish(); return Promise.resolve(_docId);
+      }
+    } catch (e) {}
+
+    var coll = (global.__SWID_ROLE === 'customer') ? 'users' : 'partners';
+    return rawDoc(FS, coll, _uid).get()
+      .then(function (s) {
+        _docId = s.exists ? _uid : _phone;
+        if (s.exists) { try { localStorage.setItem(LS, JSON.stringify({ uid: _uid, mode: 'uid' })); } catch (e) {} }
+        finish(); return _docId;
+      })
+      .catch(function () {
+        // rules ने रोका या network — सुरक्षित रास्ता: पुराना ID
+        _docId = _phone || _uid; finish(); return _docId;
+      });
+  }
+
+  function finish() {
+    _resolved = true;
+    var w = _waiters; _waiters = [];
+    w.forEach(function (fn) { try { fn(_docId); } catch (e) {} });
+  }
+
+  var _raw = null;   // लपेटने से पहले वाला असली collection()
+  function rawDoc(FS, coll, id) {
+    return (_raw ? _raw.call(FS, coll) : FS.collection(coll)).doc(id);
+  }
+
+  /**
+   * ID अनुवाद — यही पूरे shim का दिल.
+   * सिर्फ तब बदलता है जब ID *बिलकुल मेरा अपना फोन नंबर* हो.
+   * किसी और का नंबर, कोई uid, कोई code — सब वैसे के वैसे.
+   */
+  function map(coll, id) {
+    if (!KEYED[coll]) return id;
+    if (id == null) return id;
+    var s = String(id);
+    if (!_uid || !_phone) return id;
+    if (s === _phone && _docId === _uid) return _uid;
+    return id;
+  }
+
+  global.SWID = {
+    /** Firestore instance को लपेटो — app boot पर एक बार */
+    install: function (FS) {
+      if (!FS || FS.__swidWrapped) return FS;
+      _raw = FS.collection;
+      FS.collection = function (name) {
+        var c = _raw.call(this, name);
+        if (KEYED[name] && !c.__swidDoc) {
+          var origDoc = c.doc.bind(c);
+          c.doc = function (id) { return origDoc(map(name, id)); };
+          c.__swidDoc = 1;
+        }
+        return c;
+      };
+      FS.__swidWrapped = 1;
+
+      // auth बदले तो पहचान दोबारा तय करो
+      try {
+        firebase.auth().onAuthStateChanged(function () {
+          _resolved = false; _docId = ''; resolve(FS);
+        });
+      } catch (e) {}
+      resolve(FS);
+      return FS;
+    },
+
+
+    /**
+     * orders पर सही पहचान-field चुनो.
+     * migration हो चुका (mine()==uid) → partnerUid / uid
+     * उससे पहले                        → partnerPhone / mobile
+     * लौटाता है [field, value] या null अगर पहचान ही नहीं.
+     */
+    orderKey: function (role) {
+      var byUid = !!(_uid && _docId === _uid);
+      if (role === 'partner') {
+        if (byUid) return ['partnerUid', _uid];
+        return _phone ? ['partnerPhone', _phone] : null;
+      }
+      if (byUid) return ['uid', _uid];
+      return _phone ? ['mobile', _phone] : null;
+    },
+
+    /** सीधे query बना दो — null अगर पहचान नहीं */
+    orderQuery: function (FS, role) {
+      var k = this.orderKey(role);
+      // 🔒 rules में orders.list पर capped(100) है — बिना .limit() के
+      //    पूरी query reject हो जाती थी और अपने ही orders नहीं दिखते थे.
+      return k ? FS.collection('orders').where(k[0], '==', k[1]).limit(100) : null;
+    },
+
+    uid: function () { return _uid || ''; },
+    phone: function () { return _phone; },
+    /** मेरा असली doc ID — uid (या migration से पहले फोन) */
+    mine: function () { return _docId || _uid || _phone; },
+    ready: function (cb) { _resolved ? cb(_docId) : _waiters.push(cb); },
+    /** order पर मालिकाना — uid पहले, पुराने orders के लिए फोन */
+    ownsOrder: function (o) {
+      if (!o) return false;
+      if (o.partnerUid) return o.partnerUid === _uid;
+      if (o.uid) return o.uid === _uid;
+      return !!(_phone && (o.partnerPhone === _phone || o.mobile === _phone));
+    },
+    /** नया order/doc लिखते वक़्त दोनों field भरो */
+    stamp: function (obj) {
+      obj = obj || {};
+      if (_uid) obj.uid = _uid;
+      if (_phone) obj.phone = _phone;
+      return obj;
+    },
+    _map: map
+  };
+})(window);
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 1 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([1, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 2 ═══ */
+try {
+(function(){
+  'use strict';
+  var SW = window.SWSec = {};
+
+  /* ── 1. HTML escaping — XSS की पहली दीवार ── */
+  var MAP={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','/':'&#x2F;','`':'&#x60;','=':'&#x3D;'};
+  SW.esc = function(s){ return String(s==null?'':s).replace(/[&<>"'\/`=]/g, function(c){ return MAP[c]; }); };
+  SW.escAttr = function(s){ return SW.esc(s).replace(/\s/g,'&#32;'); };
+  /* URL sanitize — javascript: / data: वाले हमले रोके */
+  SW.safeUrl = function(u){
+    u = String(u||'').trim();
+    if(/^(javascript|data|vbscript|file):/i.test(u.replace(/[\s\u0000-\u001f]/g,''))) return '#';
+    return u;
+  };
+
+  /* ── 2. ROLE — सिर्फ Firebase ID token custom claim से. localStorage से कभी नहीं ── */
+  var _claims = Object.create(null);
+  var _ready  = false;
+  var _waiters = [];
+
+  SW.refreshClaims = function(force){
+    return new Promise(function(res){
+      try{
+        var u = firebase.auth().currentUser;
+        if(!u){ _claims = Object.create(null); _ready = true; return res(_claims); }
+        u.getIdTokenResult(!!force).then(function(t){
+          _claims = Object.freeze({
+            admin:   t.claims.admin   === true,
+            partner: t.claims.partner === true,
+            phone:   String(t.claims.phone || '')
+          });
+          _ready = true;
+          _waiters.splice(0).forEach(function(f){ try{f(_claims);}catch(e){} });
+          res(_claims);
+        }).catch(function(){ _claims=Object.create(null); _ready=true; res(_claims); });
+      }catch(e){ _claims=Object.create(null); _ready=true; res(_claims); }
+    });
+  };
+
+  /* 🔒 ये getters हैं — कोई इन्हें console से true नहीं कर सकता */
+  Object.defineProperty(SW,'isAdmin',  {get:function(){ return _claims.admin===true; }, configurable:false});
+  Object.defineProperty(SW,'isPartner',{get:function(){ return _claims.partner===true; }, configurable:false});
+  Object.defineProperty(SW,'phone',    {get:function(){ return _claims.phone||''; }, configurable:false});
+  Object.defineProperty(SW,'ready',    {get:function(){ return _ready; }, configurable:false});
+  Object.freeze(SW.esc); Object.freeze(SW.safeUrl);
+
+  SW.onReady = function(cb){ if(_ready) cb(_claims); else _waiters.push(cb); };
+
+  /* ── 3. Server से claims sync (login के बाद) ── */
+  SW.syncClaims = function(){
+    try{
+      if(!firebase.functions) return SW.refreshClaims(true);
+      return firebase.app().functions('asia-south1')
+        .httpsCallable('syncMyClaims')()
+        .then(function(){ return SW.refreshClaims(true); })
+        .catch(function(){ return SW.refreshClaims(true); });
+    }catch(e){ return SW.refreshClaims(true); }
+  };
+
+  /* ── 4. Callable helper — सारे संवेदनशील काम server पर ── */
+  SW.call = function(name, data){
+    try{
+      return firebase.app().functions('asia-south1').httpsCallable(name)(data||{})
+        .then(function(r){ return r.data; });
+    }catch(e){ return Promise.reject(e); }
+  };
+
+  /* ── 5. Auth state पर claims हमेशा ताज़ा रखो ── */
+  function hook(){
+    if(!window.firebase || !firebase.auth) return setTimeout(hook, 120);
+    var _synced = false;
+    firebase.auth().onAuthStateChanged(function(u){
+      /* 🔑 claim server पर बनता है, login पर अपने आप नहीं आता.
+         पहली बार user दिखते ही एक बार sync कराओ — वरना असली admin/partner
+         भी बाहर ही खड़ा रह जाता है. (यह call पहले कहीं से होती ही नहीं थी.) */
+      if (u && !_synced) {
+        _synced = true;
+        try { SW.syncClaims(); } catch (e) {}
+      }
+      if (!u) _synced = false;
+
+      SW.refreshClaims(true).then(function(c){
+        document.documentElement.setAttribute('data-role',
+          c.admin ? 'admin' : (c.partner ? 'partner' : (u ? 'user' : 'guest')));
+        /* admin-only UI सिर्फ असली admin को */
+        try{
+          document.querySelectorAll('[data-admin-only]').forEach(function(el){
+            el.style.display = c.admin ? '' : 'none';
+          });
+        }catch(e){}
+        try{ window.dispatchEvent(new CustomEvent('sw:claims', {detail:c})); }catch(e){}
+      });
+    });
+    /* हर 30 मिनट token refresh — revoke तुरंत असर करे */
+    setInterval(function(){ SW.refreshClaims(true); }, 30*60*1000);
+  }
+  hook();
+
+  /* ── 6. localStorage के नकली admin flags हमेशा साफ़ ── */
+  try{
+    ['sw_is_admin','swp_is_admin','is_admin','admin'].forEach(function(k){
+      try{ localStorage.removeItem(k); }catch(e){}
+    });
+    var _si = localStorage.setItem.bind(localStorage);
+    localStorage.setItem = function(k,v){
+      if(/^(sw_is_admin|swp_is_admin|is_admin|admin)$/i.test(String(k))){
+        console.warn('[SWSec] blocked fake admin flag:', k);
+        return;
+      }
+      return _si(k,v);
+    };
+  }catch(e){}
+
+  /* ── 7. Clickjacking से बचाव ── */
+  try{ if(window.top !== window.self) window.top.location = window.self.location; }catch(e){}
+
+  console.log('%c🔒 SewaAstra Security Core active','background:#15a04a;color:#fff;padding:3px 8px;font-weight:bold;border-radius:4px');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 2 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([2, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 3 ═══ */
+try {
+/* ═══════════════════════════════════════════════════════════════════════
+   🛡️ SWGuard — चुराए हुए session से बचाव (client हिस्सा)
+
+   माँग थी "हर 10 सेकंड IP बदले." ब्राउज़र IP बदल नहीं सकता — वह ISP का
+   होता है. और डेटा IP से चुराया भी नहीं जाता; चोरी तब होती है जब किसी के
+   हाथ आपका session लग जाए. इसलिए यहाँ IP छिपाई नहीं, IP पर नज़र रखी जाती है.
+
+   ── तीन परतें ──
+
+   1. तुरंत logout (onSnapshot)
+        security_sessions/{uid} को realtime सुनते हैं. server जैसे ही
+        revoked:true लिखता है, logout *तुरंत* — एक सेकंड से भी कम.
+        यह 10 सेकंड वाली जाँच से तेज़ है, इसलिए यही मुख्य परत है.
+
+   2. हर 10 सेकंड स्थानीय जाँच
+        निष्क्रियता का हिसाब, और listener ज़िंदा है या नहीं. कुछ भी
+        गड़बड़ लगे तो तुरंत server से पूछ लेते हैं.
+
+   3. हर 60 सेकंड server ping
+        यहीं IP/device की असली जाँच होती है — server req.rawRequest से
+        IP पढ़ता है, client से नहीं, इसलिए इसे झुठलाया नहीं जा सकता.
+
+   ⚠️ ping 10 सेकंड पर क्यों नहीं?
+      10 सेकंड = हर user रोज़ 8,640 call. 100 users पर महीने के ~2.6 करोड़
+      invocation — Cloud Functions की मुफ़्त सीमा 20 लाख/महीना है. यानी
+      बिल हज़ारों में चला जाता. 60 सेकंड पर वही सुरक्षा छठे ख़र्च में मिलती
+      है, क्योंकि असली तेज़ी परत 1 से आती है, ping से नहीं.
+      बदलना हो तो नीचे PING_MS बदल दीजिए.
+
+   ⚠️ यह client code सुरक्षा *लागू* नहीं करता — सिर्फ़ पालन करता है.
+      असली रोक Firestore rules और Cloud Function में है. कोई DevTools से
+      SWGuard बंद कर दे तो भी server उसका session मार चुका होगा, और
+      rules उसे कुछ पढ़ने-लिखने नहीं देंगे.
+   ═══════════════════════════════════════════════════════════════════════ */
+(function () {
+  'use strict';
+  if (window.SWGuard) return;
+
+  var TICK_MS  = 10 * 1000;        // स्थानीय जाँच — आपने यही माँगा था
+  var PING_MS  = 60 * 1000;        // server से IP/device जाँच
+  var IDLE_MS  = 10 * 60 * 1000;   // इतनी देर कुछ न किया तो logout
+  var WARN_MS  = 60 * 1000;        // logout से कितनी देर पहले चेतावनी
+
+  var sid = '', unsub = null, tick = null, lastPing = 0, lastAct = Date.now();
+  var warned = false, dying = false, started = false;
+
+  function newSid() {
+    // crypto.randomUUID हर जगह नहीं है (पुराने Safari/WebView) — इसलिए fallback.
+    try { if (crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
+    try {
+      var a = new Uint8Array(16); crypto.getRandomValues(a);
+      return Array.prototype.map.call(a, function (b) {
+        return ('0' + b.toString(16)).slice(-2);
+      }).join('');
+    } catch (e) {}
+    return 'sid' + Date.now() + Math.random().toString(36).slice(2);
+  }
+
+  var REASONS = {
+    'device-badla':          'आपका account किसी दूसरे device पर खुला मिला।',
+    'do-jagah-se-chal-raha': 'आपका account एक ही समय पर दो जगह से चल रहा था।',
+    'nishkriya':             'काफ़ी देर तक कोई गतिविधि नहीं हुई।',
+    'revoked':               'सुरक्षा कारणों से session बंद कर दिया गया।'
+  };
+
+  function kill(reason) {
+    if (dying) return;
+    dying = true;
+    stop();
+    var msg = REASONS[reason] || REASONS.revoked;
+    try {
+      firebase.auth().signOut().catch(function () {});
+    } catch (e) {}
+    // सारा स्थानीय डेटा भी हटाओ — साझा कंप्यूटर पर यही बचा रह जाता है
+    try { sessionStorage.clear(); } catch (e) {}
+    try {
+      Object.keys(localStorage).forEach(function (k) {
+        if (/^(sw|firebase|cart|order)/i.test(k)) localStorage.removeItem(k);
+      });
+    } catch (e) {}
+    showBox(msg);
+  }
+
+  function showBox(msg) {
+    try {
+      if (document.getElementById('swg-box')) return;
+      var d = document.createElement('div');
+      d.id = 'swg-box';
+      d.setAttribute('style',
+        'position:fixed;inset:0;z-index:2147483647;background:rgba(6,10,20,.94);' +
+        'display:flex;align-items:center;justify-content:center;padding:22px;' +
+        'font-family:system-ui,sans-serif;color:#e8eefc');
+      var card = document.createElement('div');
+      card.setAttribute('style',
+        'max-width:400px;background:#101c33;border:1px solid #2a3f66;border-radius:16px;' +
+        'padding:26px;text-align:center;line-height:1.7');
+      var h = document.createElement('div');
+      h.setAttribute('style', 'font-size:38px;margin-bottom:6px');
+      h.textContent = '🔒';
+      var t = document.createElement('div');
+      t.setAttribute('style', 'font-size:19px;font-weight:700;margin-bottom:8px');
+      t.textContent = 'Session बंद कर दिया गया';
+      var p = document.createElement('div');
+      p.setAttribute('style', 'font-size:14px;color:#b9c7e6;margin-bottom:20px');
+      p.textContent = msg + ' सुरक्षा के लिए आपको बाहर कर दिया गया है। कृपया दोबारा login करें।';
+      var b = document.createElement('button');
+      b.setAttribute('style',
+        'background:#2563eb;color:#fff;border:0;border-radius:10px;padding:11px 26px;' +
+        'font-size:15px;font-weight:600;cursor:pointer');
+      b.textContent = 'दोबारा login करें';
+      b.onclick = function () { location.reload(); };
+      // textContent इस्तेमाल किया, innerHTML नहीं — reason server से आता है
+      // और उसे सीधे HTML में डालना XSS का रास्ता खोल देता.
+      card.appendChild(h); card.appendChild(t); card.appendChild(p); card.appendChild(b);
+      d.appendChild(card);
+      document.body.appendChild(d);
+    } catch (e) {}
+  }
+
+  function toast(msg) {
+    try {
+      var id = 'swg-warn', old = document.getElementById(id);
+      if (old) old.remove();
+      var d = document.createElement('div');
+      d.id = id;
+      d.setAttribute('style',
+        'position:fixed;left:50%;transform:translateX(-50%);bottom:24px;z-index:2147483646;' +
+        'background:#7c2d12;color:#fff;border:1px solid #c2410c;padding:12px 18px;' +
+        'border-radius:12px;font-family:system-ui,sans-serif;font-size:13.5px;max-width:88vw');
+      d.textContent = msg;
+      document.body.appendChild(d);
+      setTimeout(function () { try { d.remove(); } catch (e) {} }, 8000);
+    } catch (e) {}
+  }
+
+  function ping(force) {
+    var now = Date.now();
+    if (!force && now - lastPing < PING_MS) return;
+    lastPing = now;
+    try {
+      firebase.app().functions('asia-south1')
+        .httpsCallable('sessionPing')({ sid: sid })
+        .catch(function (err) {
+          var m = String((err && err.message) || '');
+          if (m.indexOf('SESSION_KHATAM:') >= 0) {
+            kill(m.split('SESSION_KHATAM:')[1].trim());
+          }
+          // बाक़ी ग़लतियाँ (नेटवर्क टूटना वग़ैरह) चुपचाप छोड़ो — वरना
+          // ट्रेन में नेटवर्क जाते ही ग्राहक लॉगआउट हो जाएगा.
+        });
+    } catch (e) {}
+  }
+
+  function onTick() {
+    if (dying) return;
+    var idle = Date.now() - lastAct;
+
+    if (idle >= IDLE_MS) return kill('nishkriya');
+
+    if (idle >= IDLE_MS - WARN_MS && !warned) {
+      warned = true;
+      toast('⏳ आप काफ़ी देर से निष्क्रिय हैं — एक मिनट में अपने-आप logout हो जाएगा।');
+    }
+    if (idle < IDLE_MS - WARN_MS) warned = false;
+
+    ping(false);
+  }
+
+  function activity() {
+    lastAct = Date.now();
+    if (warned) {
+      warned = false;
+      var w = document.getElementById('swg-warn');
+      if (w) { try { w.remove(); } catch (e) {} }
+    }
+  }
+
+  function watch(uid) {
+    try {
+      unsub = firebase.firestore().collection('security_sessions').doc(uid)
+        .onSnapshot(function (snap) {
+          var d = snap && snap.exists ? snap.data() : null;
+          if (!d) return;
+          if (d.revoked === true) return kill(d.reason || 'revoked');
+          // दूसरी जगह नया login हुआ → यह पुराना tab बाहर
+          if (d.sid && sid && d.sid !== sid) return kill('device-badla');
+        }, function () {
+          // listener टूट गया (rules/नेटवर्क) — server से पूछ लो
+          ping(true);
+        });
+    } catch (e) {}
+  }
+
+  function stop() {
+    if (unsub) { try { unsub(); } catch (e) {} unsub = null; }
+    if (tick) { clearInterval(tick); tick = null; }
+  }
+
+  function start(user) {
+    if (started || !user) return;
+    started = true; dying = false;
+    sid = newSid();
+    lastAct = Date.now();
+    lastPing = 0;
+    ping(true);         // पहला ping तुरंत — session दर्ज हो जाए
+    watch(user.uid);
+    tick = setInterval(onTick, TICK_MS);
+
+    ['click', 'keydown', 'touchstart', 'scroll', 'mousemove'].forEach(function (ev) {
+      document.addEventListener(ev, activity, { passive: true, capture: true });
+    });
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) { activity(); ping(true); }
+    });
+  }
+
+  try {
+    firebase.auth().onAuthStateChanged(function (u) {
+      if (u) start(u);
+      else { started = false; stop(); }
+    });
+  } catch (e) {}
+
+  window.SWGuard = {
+    get sid() { return sid; },
+    get alive() { return !dying && started; },
+    idleMs: function () { return Date.now() - lastAct; },
+    ping: function () { ping(true); },
+    _judgeLocal: function (d, mySid) {     // टेस्ट के लिए
+      if (!d) return 'ok';
+      if (d.revoked === true) return 'kill:' + (d.reason || 'revoked');
+      if (d.sid && mySid && d.sid !== mySid) return 'kill:device-badla';
+      return 'ok';
+    }
+  };
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 3 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([3, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 4 ═══ */
+try {
+/* ═══ ADMIN FIREBASE CONFIG ═══ */
+var firebaseConfig = {
+  apiKey: "AIzaSyAL9dsBvNrp-ijxAk7ZYZcbN0BPaZ5gYtw",
+  authDomain: "sewaastra.firebaseapp.com",
+  projectId: "sewaastra",
+  storageBucket: "sewaastra.firebasestorage.app",
+  messagingSenderId: "211091351218",
+  appId: "1:211091351218:web:47fe25d6db3e8dd0464bab",
+  measurementId: "G-BX0Z5YQGZB"
+};
+firebase.initializeApp(firebaseConfig);
+var FS=firebase.firestore();
+try{ SWID.install(FS); }catch(e){ console.warn('SWID', e); }
+var ADMIN_EMAIL='soorshyamvishwakarma37@gmail.com';
+
+function $(i){return document.getElementById(i);}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function toast(m){var t=$('tst');t.innerText=m;t.style.display='block';clearTimeout(t._x);t._x=setTimeout(function(){t.style.display='none';},2600);}
+function ldr(){$('ldr').style.display='flex';} function ldrX(){$('ldr').style.display='none';}
+function ago(ts){if(!ts)return '';var m=Math.floor((Date.now()-ts)/60000);return m<1?'अभी':m<60?m+'m':m<1440?Math.floor(m/60)+'h':Math.floor(m/1440)+'d';}
+function inr(n){return '₹'+(n||0).toLocaleString('en-IN');}
+
+/* ═══ LOGIN — सिर्फ ADMIN GMAIL ═══ */
+function gLogin(){   try{ firebase.auth().setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(function(){}); }catch(e){} var p=new firebase.auth.GoogleAuthProvider();
+  firebase.auth().signInWithPopup(p).catch(function(e){
+    if(['auth/popup-blocked','auth/operation-not-supported-in-this-environment','auth/web-storage-unsupported'].indexOf(e.code)>-1){
+      firebase.auth().signInWithRedirect(p).catch(function(e2){$('lgE').innerText='❌ '+e2.message;});
+    } else $('lgE').innerText='❌ '+(e.message||e.code);
+  });
+}
+firebase.auth().getRedirectResult().catch(function(){});
+function lgOut(){ firebase.auth().signOut(); try{if(window.__exitGuard)window.__exitGuard.silent();}catch(_e){}location.reload(); }
+var AUTHED=false;
+firebase.auth().onAuthStateChanged(function(u){
+  if(!u){ $('lgOv').style.display='flex'; AUTHED=false; return; }
+  /* 🔒 C-2: custom claim ही असली गेट है. email string compare सिर्फ UX hint. */
+  /* 🔑 पहली बार login पर claim अभी सेट नहीं होता — इसलिए पहले
+     syncMyClaims चलाओ, तब जाकर फ़ैसला करो. पहले यह छूट गया था, जिससे
+     असली admin भी पहली बार अंदर नहीं आ पाता था. */
+  $('lgE').innerHTML='<span style="font-size:11px;color:#8a94ab;">⏳ अधिकार जाँचे जा रहे हैं…</span>';
+
+  function decide(t){
+    if(!(t && t.claims && t.claims.admin === true)) return false;
+    AUTHED=true; $('lgOv').style.display='none'; $('lgE').innerHTML='';
+    $('hSub').innerText='👑 '+u.email;
+    /* ⚠️ boot() में कोई query फेल हो तो login नहीं गिरना चाहिए —
+       वरना एक data error पूरे admin को बाहर कर देता है. */
+    try{ boot(); }catch(e){ try{ toast('⚠️ कुछ data नहीं आया: '+e.message); }catch(_){} }
+    return true;
+  }
+
+  u.getIdTokenResult(true).then(function(t){
+    if(decide(t)) return;
+
+    /* claim नहीं मिला → server से sync कराओ, फिर एक बार और देखो.
+       यहाँ सीधे callable बुलाते हैं, SWSec.syncClaims() नहीं — वो error
+       चुपचाप निगल जाता है, जिससे "admin नहीं हो" और "जाँच नहीं हो पाई"
+       एक जैसे दिखने लगते हैं. दोनों का फ़र्क़ रखना ज़रूरी है. */
+    var sync = (window.SWSec && SWSec.call)
+             ? SWSec.call('syncMyClaims', {})
+             : Promise.reject(new Error('security core लोड नहीं हुआ'));
+
+    return sync
+      .then(function(){ return u.getIdTokenResult(true); })
+      .then(function(t2){
+        if(decide(t2)) return;
+        $('lgOv').style.display='flex';
+        $('lgE').innerHTML='⛔ <b>'+esc(u.email||'?')+'</b> के पास admin अधिकार नहीं है।'
+          +'<br><span style="font-size:11px;">यह email server की ADMIN_EMAILS सूची में नहीं है,'
+          +' या Gmail verified नहीं है।</span>';
+        AUTHED=false; firebase.auth().signOut();
+      })
+      .catch(function(e){
+        $('lgOv').style.display='flex';
+        $('lgE').innerHTML='⚠️ अधिकार जाँच नहीं हो पाई — <b>'+esc(e&&e.message?e.message:'network')+'</b>'
+          +'<br><span style="font-size:11px;">Functions deploy हैं? दोबारा कोशिश करें।</span>';
+        AUTHED=false;   /* signOut नहीं — वरना user लूप में फँस जाता है */
+      });
+  }).catch(function(e){
+    AUTHED=false; $('lgOv').style.display='flex';
+    $('lgE').innerHTML='⚠️ token नहीं मिला — '+esc(e&&e.message?e.message:'?');
+  });
+  return;
+  /* पुराना client-side check (अब dead code, reference के लिए): */
+  if((u.email||'').toLowerCase()!==ADMIN_EMAIL){
+    $('lgE').innerHTML='⛔ <b>'+esc(u.email||'?')+'</b> authorized नहीं है!<br>सिर्फ admin Gmail से login करें।';
+    firebase.auth().signOut();
+    return;
+  }
+  AUTHED=true;
+  $('lgOv').style.display='none';
+  $('hSub').innerText='👑 '+u.email;
+  boot();
+});
+
+/* ═══ DATA ═══ */
+var ORD=[], PTR=[], TIK=[], USR={};
+var WDS=[], DEPS=[], INCS=[], GIFTS=[];
+var booted=false;
+function boot(){
+  if(booted) return; booted=true;
+  FS.collection('orders').onSnapshot(function(s){
+    ORD=s.docs.map(function(d){var o=d.data();o._id=d.id;return o;});
+    drawDash(); drawOrders(); badges();
+  },function(e){ toast('❌ orders: '+e.message); });
+  FS.collection('partners').limit(500).onSnapshot(function(s){
+    PTR=s.docs.map(function(d){var p=d.data();p._id=d.id;return p;});
+    drawDash(); drawPartners(); drawKyc(); badges();
+  },function(e){ toast('❌ partners: '+e.message); });
+  FS.collection('tickets').limit(300).onSnapshot(function(s){
+    TIK=s.docs.map(function(d){var t=d.data();t._id=d.id;return t;}).sort(function(a,b){return (b.ts||0)-(a.ts||0);});
+    drawTix(); badges();
+  },function(e){});
+  /* 🔒 पूरा users dump हटाया — अब limit + audit के साथ Function से */
+  SWSec.call('adminList',{collection:'users',limit:200})
+    .then(function(r){ (r.docs||[]).forEach(function(d){ USR[d._id]=d; }); })
+    .catch(function(){});
+  loadGroups();
+  toast('👑 Admin Panel तैयार!');
+}
+function loadGroups(){
+  Promise.all([
+    FS.collectionGroup('withdrawals').get(),
+    FS.collectionGroup('deposits').get(),
+    FS.collectionGroup('incentives').get(),
+    FS.collectionGroup('gifts').get()
+  ]).then(function(r){
+    function mp(sn){ return sn.docs.map(function(d){ var x=d.data(); x._id=d.id; x._ph=d.ref.parent.parent.id; x._ref=d.ref; return x; }).sort(function(a,b){return (b.ts||0)-(a.ts||0);}); }
+    WDS=mp(r[0]); DEPS=mp(r[1]); INCS=mp(r[2]); GIFTS=mp(r[3]);
+    drawMoney(); drawTix(); drawDash(); badges();
+  }).catch(function(e){ toast('⚠️ '+e.message); });
+}
+function refreshAll(){ ldr(); loadGroups(); setTimeout(function(){ldrX();toast('🔄 Refresh!');},900); }
+
+/* ═══ TABS ═══ */
+function tab(t,btn){
+  ['D','O','P','K','M','T'].forEach(function(x){$('sec'+x).classList.remove('act');});
+  $('sec'+t).classList.add('act');
+  document.querySelectorAll('.nv button').forEach(function(b){b.classList.remove('act');});
+  btn.classList.add('act');
+  if(t==='M') drawMoney();
+  if(t==='T') drawTix();
+}
+function badges(){
+  function bd(id,n){var e=$(id);e.style.display=n?'block':'none';e.innerText=n;}
+  bd('bO',ORD.filter(function(o){return o.status==='Order Placed';}).length);
+  bd('bK',PTR.filter(function(p){return p.kycStatus==='Submitted';}).length);
+  bd('bM',WDS.filter(function(w){return w.status==='Requested';}).length+DEPS.filter(function(d){return d.status==='Pending';}).length);
+  bd('bT',TIK.filter(function(t){return (t.status||'Open')==='Open';}).length+GIFTS.filter(function(g){return g.status==='Booked';}).length);
+}
+
+/* ═══ DASHBOARD ═══ */
+var SC={'Order Placed':'#ff6b00','Accepted':'#1976d2','On the Way':'#7b1fa2','Working':'#b07800','Completed':'#15a04a','Cancelled':'#e53935'};
+function drawDash(){
+  var td=new Date().toDateString();
+  var tdO=ORD.filter(function(o){return new Date(o.createdAt||0).toDateString()===td;});
+  var done=ORD.filter(function(o){return o.status==='Completed';});
+  var rev=done.reduce(function(s,o){return s+(o.total||0);},0);
+  var tdRev=done.filter(function(o){return new Date(o.createdAt||0).toDateString()===td;}).reduce(function(s,o){return s+(o.total||0);},0);
+  var onlP=PTR.filter(function(p){return p.online;}).length;
+  var pk=PTR.filter(function(p){return p.kycStatus==='Submitted';}).length;
+  var pw=WDS.filter(function(w){return w.status==='Requested';}).length;
+  var pd=DEPS.filter(function(d){return d.status==='Pending';}).length;
+  var pt=TIK.filter(function(t){return (t.status||'Open')==='Open';}).length;
+  var pg=GIFTS.filter(function(g){return g.status==='Booked';}).length;
+  $('dX').innerHTML=
+  '<div class="grid2">'+
+  '<div class="tile hot"><b>'+inr(rev)+'</b><span>कुल REVENUE</span></div>'+
+  '<div class="tile"><b>'+inr(tdRev)+'</b><span>आज की कमाई</span></div>'+
+  '<div class="tile"><b>'+ORD.length+'</b><span>कुल ORDERS</span></div>'+
+  '<div class="tile"><b>'+tdO.length+'</b><span>आज के ORDERS</span></div>'+
+  '<div class="tile"><b>'+PTR.length+'</b><span>PARTNERS</span></div>'+
+  '<div class="tile"><b style="color:#2bc96e;">'+onlP+' 🟢</b><span>ONLINE अभी</span></div>'+
+  '</div>'+
+  '<div class="tt">⚡ Action चाहिए</div>'+
+  '<div class="grid2">'+
+  '<div class="tile '+(pk?'hot':'')+'" onclick="tab(\'K\',document.querySelectorAll(\'.nv button\')[3])" style="cursor:pointer;"><b>'+pk+'</b><span>KYC PENDING 🪪</span></div>'+
+  '<div class="tile '+(pw?'hot':'')+'" onclick="tab(\'M\',document.querySelectorAll(\'.nv button\')[4])" style="cursor:pointer;"><b>'+pw+'</b><span>WITHDRAWALS 💸</span></div>'+
+  '<div class="tile '+(pd?'hot':'')+'" onclick="tab(\'M\',document.querySelectorAll(\'.nv button\')[4])" style="cursor:pointer;"><b>'+pd+'</b><span>CASH DEPOSITS 💵</span></div>'+
+  '<div class="tile '+(pt+pg?'hot':'')+'" onclick="tab(\'T\',document.querySelectorAll(\'.nv button\')[5])" style="cursor:pointer;"><b>'+(pt+pg)+'</b><span>TICKETS+GIFTS 🎫</span></div>'+
+  '</div>'+
+  '<div class="tt">🔴 Live Orders</div>'+
+  (ORD.filter(function(o){return ['Order Placed','Accepted','On the Way','Working'].indexOf(o.status)>-1;}).sort(function(a,b){return (b.createdAt||0)-(a.createdAt||0);}).slice(0,6).map(oRow).join('')||'<div class="em">कोई live order नहीं</div>');
+}
+
+/* ═══ ORDERS ═══ */
+var oFil='ALL';
+var FLOWS=['Order Placed','Accepted','On the Way','Working','Completed','Cancelled'];
+function drawOrders(){
+  var t=$('oTabs');
+  t.innerHTML=['ALL'].concat(FLOWS).map(function(f){
+    var n=f==='ALL'?ORD.length:ORD.filter(function(o){return o.status===f;}).length;
+    return '<span class="'+(oFil===f?'on':'')+'" onclick="oFil=\''+f+'\';drawOrders()">'+f+' ('+n+')</span>';
+  }).join('');
+  var l=(oFil==='ALL'?ORD:ORD.filter(function(o){return o.status===oFil;})).sort(function(a,b){return (b.createdAt||0)-(a.createdAt||0);});
+  $('oX').innerHTML=l.slice(0,60).map(oRow).join('')||'<div class="em">📭 कोई order नहीं</div>';
+}
+function oRow(o){
+  var pay=o.payment||{};
+  var pv=pay.verified||/^paid/i.test(pay.status||'');
+  return '<div class="cd" onclick="oView(\''+o._id+'\')" style="cursor:pointer;">'+
+  '<div class="rw"><b style="font-size:12px;">'+esc(o.id||o._id)+'</b><span class="ch" style="background:'+(SC[o.status]||'#555')+'22;color:'+(SC[o.status]||'#999')+';">'+esc(o.status||'')+'</span></div>'+
+  '<div class="mut" style="margin-top:4px;">👤 '+esc(o.mobile||'')+' • '+esc(o.date||'')+' '+esc(o.time||'')+' • '+ago(o.createdAt)+'</div>'+
+  '<div class="rw" style="margin-top:5px;"><span style="font-size:11px;font-weight:700;">🛠️ '+esc((o.items||[]).map(function(i){return i.n;}).join(', ').slice(0,40))+'</span>'+
+  '<b style="color:'+(pv?'#2bc96e':'#ffb74d')+';">'+inr(o.total)+(pv?' ✅':' ⏳')+'</b></div>'+
+  (o.partnerName?'<div class="mut" style="margin-top:3px;">🧑‍🔧 '+esc(o.partnerName)+' ('+esc(o.partnerPhone||'')+')'+(o.startSelfie?' • 🤳✓':'')+'</div>':'')+'</div>';
+}
+function oView(id){
+  var o=ORD.filter(function(x){return x._id===id;})[0]; if(!o) return;
+  var pay=o.payment||{};
+  $('shX').innerHTML=
+  '<div class="rw"><b style="font-size:14px;">📦 '+esc(o.id||id)+'</b><span style="font-size:20px;cursor:pointer;" onclick="shClose()">✕</span></div>'+
+  '<div class="mut" style="margin:4px 0 8px;">'+esc(o.status)+' • '+ago(o.createdAt)+' • '+esc(o.mode||'')+'</div>'+
+  '<div class="cd"><b style="font-size:11.5px;">🛒 Items — '+inr(o.total)+'</b><div class="mut" style="margin-top:5px;line-height:1.8;">'+(o.items||[]).map(function(i){return '• '+esc(i.n)+' ×'+(i.qty||1);}).join('<br>')+'</div>'+
+  '<div class="mut" style="margin-top:6px;">📍 '+esc(o.address||'')+'</div>'+
+  '<div class="mut">👤 Customer: '+esc(o.mobile||'')+' <a href="tel:+91'+esc(o.mobile||'')+'" style="color:#7fb3ff;">📞</a></div>'+
+  (o.partnerPhone?'<div class="mut">🧑‍🔧 Partner: '+esc(o.partnerName||'')+' ('+esc(o.partnerPhone)+')</div>':'<div class="mut">🧑‍🔧 अभी assign नहीं</div>')+'</div>'+
+  '<div class="cd"><b style="font-size:11.5px;">💳 Payment</b>'+
+  '<div class="mut" style="margin-top:4px;">Status: '+esc(pay.status||'—')+' • UTR: '+esc(pay.ref||'—')+(pay.verified?' • ✅ Verified':'')+'</div>'+
+  (!pay.verified&&pay.ref?'<button class="bn g" style="width:100%;margin-top:8px;" onclick="oPayV(\''+id+'\')">✅ Payment VERIFY करें</button>':'')+'</div>'+
+  (o.startSelfie&&o.startSelfie.img?'<div class="cd"><b style="font-size:11.5px;">🤳 Work-start Selfie '+(o.startSelfie.live?'(LIVE ✓)':'')+' — '+esc(o.startSelfie.at||'')+'</b><img class="kimg" src="'+o.startSelfie.img+'"></div>':'')+
+  '<div class="cd"><b style="font-size:11.5px;">⚙️ Status बदलें</b>'+
+  '<select id="oSt">'+FLOWS.map(function(f){return '<option '+(o.status===f?'selected':'')+'>'+f+'</option>';}).join('')+'</select>'+
+  '<div style="display:flex;gap:8px;margin-top:9px;"><button class="bn o" style="flex:2;" onclick="oSet(\''+id+'\')">💾 Update</button>'+
+  '<button class="bn r" style="flex:1;" onclick="oDel(\''+id+'\')">🗑️ Delete</button></div></div>';
+  $('shO').classList.add('on');
+}
+function oPayV(id){
+  ldr();
+  FS.collection('orders').doc(id).update({'payment.verified':true,'payment.status':'Paid ✅ (Admin verified)','payment.verifiedAt':Date.now()})
+  .then(function(){ldrX();toast('✅ Payment verified!');shClose();}).catch(function(e){ldrX();toast('❌ '+e.message);});
+}
+function oSet(id){
+  var st=$('oSt').value; ldr();
+  var u={status:st}; u['t_'+st.replace(/\s/g,'')]=Date.now();
+  FS.collection('orders').doc(id).update(u).then(function(){ldrX();toast('📌 '+st);shClose();}).catch(function(e){ldrX();toast('❌ '+e.message);});
+}
+function oDel(id){
+  swUi.confirm({icon:'🗑️',title:'Order Delete',msg:'पक्का DELETE? वापस नहीं आएगा!',ok:'हाँ, Delete',cancel:'रुकें',danger:true,onOk:function(){
+    ldr();
+    FS.collection('orders').doc(id).delete().then(function(){ldrX();toast('🗑️ Deleted');shClose();}).catch(function(e){ldrX();toast('❌ '+e.message);});
+  }});
+}
+function shClose(){ $('shO').classList.remove('on'); }
+
+/* ═══ PARTNERS ═══ */
+function drawPartners(){
+  var l=PTR.slice().sort(function(a,b){return (b.lastSeen||b.lastLogin||0)-(a.lastSeen||a.lastLogin||0);});
+  $('pX').innerHTML=l.map(function(p){
+    var on=p.online&&(Date.now()-(p.lastSeen||p.onlineAt||0))<150000;
+    var kc=p.kycStatus==='Approved'?'#2bc96e':p.kycStatus==='Submitted'?'#ffb74d':'#ff8a80';
+    return '<div class="cd" onclick="pView(\''+p._id+'\')" style="cursor:pointer;"><div class="rw">'+
+    '<b style="font-size:12.5px;"><span class="dt" style="background:'+(on?'#2bc96e':'#555')+';"></span>'+esc(p.name||'Partner')+'</b>'+
+    '<span class="ch" style="background:'+kc+'22;color:'+kc+';">'+esc(p.kycStatus||'No KYC')+'</span></div>'+
+    '<div class="mut" style="margin-top:4px;">📱 '+esc(p._id)+' • ⭐ '+(p.avgRating||'—')+' • '+(on?'🟢 ONLINE':'⚫ '+ago(p.lastSeen||p.lastLogin))+(p.trainingDone?' • 🎓':'')+(p.dnd?' • 📵':'')+'</div></div>';
+  }).join('')||'<div class="em">🧑‍🔧 अभी कोई partner नहीं</div>';
+}
+function pView(ph){
+  var p=PTR.filter(function(x){return x._id===ph;})[0]; if(!p) return;
+  var ki=p.kycInfo||{}, b=p.bank||{};
+  $('shX').innerHTML=
+  '<div class="rw"><b style="font-size:14px;">🧑‍🔧 '+esc(p.name||'Partner')+'</b><span style="font-size:20px;cursor:pointer;" onclick="shClose()">✕</span></div>'+
+  '<div class="mut" style="margin:4px 0 8px;">📱 '+esc(ph)+' • ⭐ '+(p.avgRating||'—')+' ('+(p.ratingCount||0)+') • '+esc(p.kycStatus||'No KYC')+(p.trainingDone?' • 🎓 Trained':'')+'</div>'+
+  '<div class="cd"><b style="font-size:11.5px;">📋 KYC जानकारी</b><div class="mut" style="margin-top:5px;line-height:2;">'+
+  '👤 '+esc(p.name||'—')+' • 👨 पिता: '+esc(ki.father||'—')+'<br>🎂 '+esc(ki.dob||'—')+' • 🛠️ '+esc(ki.mainSkill||(p.skills||[]).join(', ')||'—')+
+  '<br>🏠 '+esc(ki.address||'—')+', '+esc(ki.city||'')+' - '+esc(ki.pin||'')+
+  '<br>🪪 आधार: '+esc(ki.aadhaar||'—')+' • PAN: '+esc(ki.pan||'—')+
+  '<br>🏦 '+esc(b.holder||'—')+' • '+esc(b.acc||'—')+' • '+esc(b.ifsc||'')+(b.name?' • '+esc(b.name):'')+
+  '<br>📍 Area: '+esc(p.wkCity||'—')+' ('+esc(p.wkPin||'')+') • Radius '+(p.radiusKm||8)+'km • 🚗 '+esc(p.vehicle||'—')+'</div></div>'+
+  '<div class="cd"><b style="font-size:11.5px;">📸 KYC Documents</b><div id="pDocs" class="mut" style="margin-top:5px;">Loading photos...</div></div>'+
+  '<div class="cd"><b style="font-size:11.5px;">⚙️ Actions</b>'+
+  '<div style="display:flex;gap:8px;margin-top:9px;flex-wrap:wrap;">'+
+  (p.kycStatus!=='Approved'?'<button class="bn g" style="flex:1;" onclick="pKyc(\''+ph+'\',\'Approved\')">✅ APPROVE</button>':'')+
+  (p.kycStatus==='Submitted'?'<button class="bn r" style="flex:1;" onclick="pKyc(\''+ph+'\',\'Rejected\')">❌ REJECT</button>':'')+
+  (p.kycStatus==='Approved'?'<button class="bn r" style="flex:1;" onclick="pKyc(\''+ph+'\',\'Pending\')">🔄 KYC Reset</button>':'')+
+  '<a class="bn b" style="flex:1;text-align:center;text-decoration:none;" href="tel:+91'+esc(ph)+'">📞 Call</a>'+
+  '<a class="bn g" style="flex:1;text-align:center;text-decoration:none;" href="https://wa.me/91'+esc(ph)+'" target="_blank" rel="noopener noreferrer">💬 WA</a></div></div>';
+  $('shO').classList.add('on');
+  FS.collection('partners').doc(ph).collection('kyc').get().then(function(s){
+    var h='';
+    s.docs.forEach(function(d){ var x=d.data(); if(x.img) h+='<div class="mut" style="margin-top:8px;font-weight:800;">'+esc(d.id)+' • '+esc(x.at||'')+'</div><img class="kimg" src="'+x.img+'">'; });
+    $('pDocs').innerHTML=h||'📭 कोई document नहीं';
+  }).catch(function(e){ $('pDocs').innerText='❌ '+e.message; });
+}
+function pKyc(ph,st){
+  ldr();
+  SWSec.call('setPartnerApproval',{phone:ph,approve:(st==='Approved')})
+  .then(function(){ldrX();toast(st==='Approved'?'🎉 APPROVED — partner को तुरंत खुल जाएगा!':'📌 '+st);shClose();})
+  .catch(function(e){ldrX();toast('❌ '+e.message);});
+}
+
+/* ═══ KYC QUEUE ═══ */
+function drawKyc(){
+  var q=PTR.filter(function(p){return p.kycStatus==='Submitted';});
+  $('kX').innerHTML='<div class="tt">🪪 KYC Approval Queue ('+q.length+')</div>'+
+  (q.map(function(p){
+    var ki=p.kycInfo||{};
+    return '<div class="cd"><div class="rw"><b style="font-size:12.5px;">'+esc(p.name||'Partner')+'</b><span class="mut">'+ago(p.kycAt)+'</span></div>'+
+    '<div class="mut" style="margin-top:4px;line-height:1.9;">📱 '+esc(p._id)+' • 🏠 '+esc(ki.city||'—')+' • 🪪 '+esc(ki.aadhaar||'—')+'<br>🛠️ '+esc(ki.mainSkill||'—')+' • 👨 '+esc(ki.father||'—')+'</div>'+
+    '<div style="display:flex;gap:8px;margin-top:9px;">'+
+    '<button class="bn gy" style="flex:1;" onclick="pView(\''+p._id+'\')">👁️ पूरा देखें</button>'+
+    '<button class="bn g" style="flex:1;" onclick="pKyc(\''+p._id+'\',\'Approved\')">✅ APPROVE</button>'+
+    '<button class="bn r" onclick="pKyc(\''+p._id+'\',\'Rejected\')">❌</button></div></div>';
+  }).join('')||'<div class="em">✅ कोई KYC pending नहीं — सब clear!</div>')+
+  '<div class="tt">✔ Approved Partners (हाल के / online)</div>'+
+  (PTR.filter(function(p){return p.kycStatus==='Approved';}).slice(0,80).map(function(p){
+    return '<div class="cd" style="padding:9px 13px;" onclick="pView(\''+p._id+'\')"><div class="rw"><b style="font-size:11.5px;">✅ '+esc(p.name||'')+'</b><span class="mut">'+esc(p._id)+'</span></div></div>';
+  }).join('')||'<div class="em">—</div>');
+}
+
+/* ═══ MONEY: withdrawals + deposits + incentives ═══ */
+function cpBk(ac,ifsc){ var t='A/C: '+ac+'\nIFSC: '+ifsc; var ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta); ta.select(); try{ document.execCommand('copy'); }catch(e){} ta.remove(); toast('📋 A/C + IFSC copy — bank app में paste करें'); }
+function drawMoney(){
+  $('mX').innerHTML=
+  '<div class="tt">💸 Withdraw Requests</div>'+
+  (WDS.map(function(w){
+    var cl=w.status==='Paid'?'#2bc96e':'#ffb74d';
+    return '<div class="cd"><div class="rw"><b style="font-size:12px;">'+inr(w.amt)+' → '+(w.acc?('A/C '+esc(w.acc)+' • IFSC '+esc(w.ifsc||'')):esc(w.upi||''))+'</b><span class="ch" style="background:'+cl+'22;color:'+cl+';">'+esc(w.status||'')+'</span></div>'+
+    '<div class="mut" style="margin-top:4px;">🧑‍🔧 '+esc(w.holder||w.name||'')+' ('+esc(w._ph)+') • '+esc(w.at||'')+(w.holder&&w.name?(' • '+esc(w.name)):'')+'</div>'+
+    (w.status!=='Paid'?'<div style="display:flex;gap:8px;margin-top:8px;">'+
+      (w.acc?'<button class="bn b" style="flex:1;" onclick="cpBk(\''+esc(w.acc)+'\',\''+esc(w.ifsc||'')+'\')">📋 A/C+IFSC Copy</button>':'<a class="bn b" style="flex:1;text-align:center;text-decoration:none;" href="upi://pay?pa='+encodeURIComponent(w.upi||'')+'&pn=Partner&am='+(w.amt||0)+'&cu=INR">📲 UPI से भेजें</a>')+
+    '<button class="bn g" style="flex:1;" onclick="gSet(this,\'withdrawals\',\''+w._ph+'\',\''+w._id+'\',\'Paid\')">✅ PAID mark</button></div>':'')+'</div>';
+  }).join('')||'<div class="em">कोई withdraw request नहीं</div>')+
+  '<div class="tt">💵 Cash Deposits (floating limit ₹2000)</div>'+
+  (DEPS.map(function(d){
+    var cl=d.status==='Approved'?'#2bc96e':d.status==='Rejected'?'#ff8a80':'#ffb74d';
+    return '<div class="cd"><div class="rw"><b style="font-size:12px;">'+inr(d.amt)+' • UTR: '+esc(d.ref||'')+'</b><span class="ch" style="background:'+cl+'22;color:'+cl+';">'+esc(d.status||'')+'</span></div>'+
+    '<div class="mut" style="margin-top:4px;">🧑‍🔧 '+esc(d.name||'')+' ('+esc(d._ph)+') • '+esc(d.at||'')+'</div>'+
+    (d.status==='Pending'?'<div style="display:flex;gap:8px;margin-top:8px;"><button class="bn g" style="flex:1;" onclick="gSet(this,\'deposits\',\''+d._ph+'\',\''+d._id+'\',\'Approved\')">✅ APPROVE</button>'+
+    '<button class="bn r" style="flex:1;" onclick="gSet(this,\'deposits\',\''+d._ph+'\',\''+d._id+'\',\'Rejected\')">❌ REJECT</button></div>':'')+'</div>';
+  }).join('')||'<div class="em">कोई deposit नहीं</div>')+
+  '<div class="tt">🏆 Incentives Earned</div>'+
+  (INCS.map(function(x){
+    var cl=x.status==='Paid'?'#2bc96e':'#ffb74d';
+    return '<div class="cd"><div class="rw"><b style="font-size:12px;">'+esc(x.name||'')+' — '+inr(x.amt)+'</b><span class="ch" style="background:'+cl+'22;color:'+cl+';">'+esc(x.status||'')+'</span></div>'+
+    '<div class="mut" style="margin-top:4px;">🧑‍🔧 '+esc(x.pname||'')+' ('+esc(x._ph)+') • '+esc(x.at||'')+'</div>'+
+    (x.status!=='Paid'?'<button class="bn g" style="width:100%;margin-top:8px;" onclick="gSet(this,\'incentives\',\''+x._ph+'\',\''+x._id+'\',\'Paid\')">✅ PAID mark</button>':'')+'</div>';
+  }).join('')||'<div class="em">कोई incentive नहीं</div>');
+}
+function gSet(btn,coll,ph,id,st){
+  ldr();
+  (coll==='withdrawals'
+    ? SWSec.call('approveWithdrawal',{phone:ph,id:id,approve:(st==='Paid'||st==='Approved'),utr:''})
+    : SWSec.call('actionCashDeposit',{phone:ph,id:id,approve:(st==='Verified')}))
+  .then(function(){ ldrX(); toast('✅ '+st); loadGroups(); })
+  .catch(function(e){ ldrX(); toast('❌ '+e.message); });
+}
+
+/* ═══ TICKETS + GIFTS ═══ */
+function drawTix(){
+  $('tX').innerHTML=
+  '<div class="tt">🎫 Support Tickets</div>'+
+  (TIK.map(function(t){
+    var st=t.status||'Open';
+    var cl=st==='Resolved'?'#2bc96e':st==='In Progress'?'#7fb3ff':'#ffb74d';
+    return '<div class="cd"><div class="rw"><b style="font-size:12px;">'+esc(t.cat||'')+'</b><span class="ch" style="background:'+cl+'22;color:'+cl+';">'+esc(st)+'</span></div>'+
+    '<div class="mut" style="margin-top:4px;">'+esc(t.name||'')+' ('+esc(t.phone||'')+') • '+esc(t.at||'')+'</div>'+
+    '<div style="font-size:11.5px;margin-top:6px;line-height:1.6;">'+esc(t.msg||'')+'</div>'+
+    (t.reply?'<div class="mut" style="background:#0f1626;border-radius:9px;padding:7px 10px;margin-top:6px;">👨‍💼 '+esc(t.reply)+'</div>':'')+
+    (st!=='Resolved'?'<div style="display:flex;gap:8px;margin-top:8px;"><button class="bn o" style="flex:1;" onclick="tReply(\''+t._id+'\')">💬 Reply + Resolve</button>'+
+    '<button class="bn b" onclick="tProg(\''+t._id+'\')">🔧</button></div>':'')+'</div>';
+  }).join('')||'<div class="em">🎉 कोई ticket नहीं</div>')+
+  '<div class="tt">🎁 Gift Bookings</div>'+
+  (GIFTS.map(function(g){
+    var cl=g.status==='Delivered'?'#2bc96e':'#ffb74d';
+    return '<div class="cd"><div class="rw"><b style="font-size:12px;">'+esc(g.icon||'🎁')+' '+esc(g.item||'')+' ('+(g.pts||0)+' pts)</b><span class="ch" style="background:'+cl+'22;color:'+cl+';">'+esc(g.status||'')+'</span></div>'+
+    '<div class="mut" style="margin-top:4px;">🧑‍🔧 '+esc(g.name||'')+' ('+esc(g._ph)+') • '+esc(g.at||'')+'</div>'+
+    (g.status!=='Delivered'?'<button class="bn g" style="width:100%;margin-top:8px;" onclick="gSet(this,\'gifts\',\''+g._ph+'\',\''+g._id+'\',\'Delivered\')">📦 DELIVERED mark</button>':'')+'</div>';
+  }).join('')||'<div class="em">कोई gift booking नहीं</div>');
+}
+function tReply(id){
+  swUi.prompt({icon:'💬',title:'Reply भेजें',msg:'Partner को जवाब लिखें:',ph:'जवाब…',ok:'✅ Reply भेजें',cancel:'रद्द',onOk:function(v){
+    var r=String(v==null?'':v).trim();
+    if(!r){ toast('❌ खाली reply नहीं भेज सकते'); return; }
+    ldr();
+    SWSec.call('replyTicket',{id:id,reply:r})
+    .then(function(){ldrX();toast('✅ Reply भेज दिया — Resolved');}).catch(function(e){ldrX();toast('❌ '+e.message);});
+  }});
+}
+function tProg(id){
+  FS.collection('tickets').doc(id).update({status:'In Progress'}).then(function(){toast('🔧 In Progress');});
+}
+console.log('%c 👑 SewaAstra ADMIN v1.0 — A→Z CONTROL ','background:linear-gradient(90deg,#ffd700,#ff6b00);color:#1a1030;font-weight:bold;padding:4px;');
+
+/* ═══════════════ ADMIN v2.0 — TRACKING + BLOCK + ALERTS + COMPLAINTS ═══════════════ */
+
+function leaf(){
+  if(window.L) return Promise.resolve();
+  return new Promise(function(res,rej){
+    var c=document.createElement('link');c.rel='stylesheet';c.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';document.head.appendChild(c);
+    var s=document.createElement('script');s.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';s.onload=res;s.onerror=rej;document.head.appendChild(s);
+  });
+}
+
+/* 🗺️ 1) PARTNER LIVE TRACKING MAP */
+var aMap=null,aLG=null;
+(function(){
+  var t=$('trkC'); if(!t) return;
+  t.innerHTML='<div class="cd"><div class="rw"><b style="font-size:12px;">🗺️ Partner LIVE Tracking</b><span class="mut" id="aMapS"></span></div><div id="aMapC" style="height:240px;border-radius:13px;overflow:hidden;margin-top:8px;border:1px solid var(--bd);"></div></div>';
+})();
+function aMapDraw(){
+  var el=$('aMapC'); if(!el||!AUTHED) return;
+  leaf().then(function(){
+    if(!aMap){
+      aMap=L.map('aMapC').setView([23.2599,77.4126],11);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OSM'}).addTo(aMap);
+      aLG=L.layerGroup().addTo(aMap);
+      setTimeout(function(){try{aMap.invalidateSize();}catch(e){}},400);
+    }
+    aLG.clearLayers();
+    var n=0,pts=[];
+    PTR.forEach(function(p){
+      var l=p.loc&&p.loc.lat?p.loc:(p.workCenter&&p.workCenter.lat?p.workCenter:null);
+      if(!l) return;
+      var on=p.online&&(Date.now()-(p.lastSeen||0))<150000;
+      var live=p.loc&&p.loc.ts&&(Date.now()-p.loc.ts)<120000;
+      if(on)n++;
+      pts.push([l.lat,l.lon]);
+      L.marker([l.lat,l.lon],{icon:L.divIcon({html:'<div style="font-size:24px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.5));'+(on?'':'opacity:.45;')+'">'+(p.blocked?'⛔':'🧑‍🔧')+'</div>',iconSize:[28,28],className:''})}).addTo(aLG)
+        .bindPopup('<b>'+esc(p.name||'Partner')+'</b> '+(on?'🟢':'⚫')+(live?' <span style="color:#e53935;font-weight:800;">LIVE</span>':'')+'<br>📱 '+esc(p._id)+'<br>⭐ '+(p.avgRating||'—')+' • '+esc(p.kycStatus||'')+'<br><a href="#" onclick="pView(\''+p._id+'\');return false;">पूरा देखें →</a>');
+    });
+    if(pts.length===1) aMap.setView(pts[0],13);
+    else if(pts.length>1){ try{ aMap.fitBounds(pts,{padding:[26,26]}); }catch(e){} }
+    var s=$('aMapS'); if(s) s.innerText='🟢 '+n+' online • '+pts.length+' on map';
+  }).catch(function(){});
+}
+var _dP2=drawPartners;
+drawPartners=function(){ _dP2(); try{ aMapDraw(); }catch(e){} };
+var _tab2=tab;
+tab=function(t,btn){ _tab2(t,btn); if(t==='P') setTimeout(function(){ try{ aMap&&aMap.invalidateSize(); aMapDraw(); }catch(e){} },250); };
+
+/* ⛔ 2) PARTNER BLOCK / UNBLOCK */
+function pBlock(ph,flag){
+  function doIt(){
+    ldr();
+    SWSec.call('setPartnerBlocked',{phone:ph,blocked:flag})
+    .then(function(){ ldrX(); toast(flag?'⛔ BLOCKED — partner लॉक हो गया':'✅ UNBLOCK — partner फिर चालू'); shClose(); })
+    .catch(function(e){ ldrX(); toast('❌ '+e.message); });
+  }
+  if(!flag){ doIt(); return; }
+  swUi.confirm({icon:'⛔',title:'Partner BLOCK करें?',msg:'पक्का BLOCK करें? Partner app तुरंत लॉक हो जाएगा!',ok:'हाँ, BLOCK',cancel:'रुकें',danger:true,onOk:doIt});
+}
+var _pV2=pView;
+pView=function(ph){
+  _pV2(ph);
+  var p=PTR.filter(function(x){return x._id===ph;})[0]; if(!p) return;
+  var low=(p.avgRating&&p.avgRating<3.5&&(p.ratingCount||0)>=2);
+  $('shX').insertAdjacentHTML('beforeend',
+    (low?'<div class="cd" style="border-color:#e53935;"><b style="font-size:11.5px;color:#ff8a80;">⚠️ POOR RATING ALERT — ⭐ '+p.avgRating+' ('+(p.ratingCount||0)+' reviews)</b><div class="mut" style="margin-top:4px;">Training दोबारा करवाएँ या warning दें</div></div>':'')+
+    '<div class="cd"><b style="font-size:11.5px;">'+(p.blocked?'⛔ यह partner BLOCKED है':'🚦 Partner Control')+'</b>'+
+    '<div style="display:flex;gap:8px;margin-top:9px;">'+
+    (p.blocked?'<button class="bn g" style="flex:1;" onclick="pBlock(\''+ph+'\',false)">✅ UNBLOCK करें</button>'
+      :'<button class="bn r" style="flex:1;" onclick="pBlock(\''+ph+'\',true)">⛔ BLOCK करें</button>')+
+    '</div></div>');
+};
+
+/* ⚠️ 3) DASHBOARD ALERTS — poor rating + blocked */
+var _dD2=drawDash;
+drawDash=function(){
+  _dD2();
+  var low=PTR.filter(function(p){return p.avgRating&&p.avgRating<3.5&&(p.ratingCount||0)>=2&&!p.blocked;});
+  var blk=PTR.filter(function(p){return p.blocked;});
+  var h='';
+  if(low.length) h+='<div class="tt" style="color:#ff8a80;">⚠️ Poor Rating Alerts ('+low.length+')</div>'+low.map(function(p){
+    return '<div class="cd" style="border-color:#5a2025;" onclick="pView(\''+p._id+'\')"><div class="rw"><b style="font-size:12px;">⚠️ '+esc(p.name||'Partner')+'</b><b style="color:#ff8a80;">⭐ '+p.avgRating+'</b></div><div class="mut" style="margin-top:3px;">📱 '+esc(p._id)+' • '+(p.ratingCount||0)+' reviews • tap करके action लें</div></div>';
+  }).join('');
+  if(blk.length) h+='<div class="tt">⛔ Blocked Partners ('+blk.length+')</div>'+blk.map(function(p){
+    return '<div class="cd" onclick="pView(\''+p._id+'\')"><div class="rw"><b style="font-size:12px;">⛔ '+esc(p.name||'')+'</b><span class="mut">'+esc(p._id)+'</span></div></div>';
+  }).join('');
+  if(h) $('dX').insertAdjacentHTML('beforeend',h);
+};
+
+/* 🛒 4) COMPLAINTS FILTER — customer vs partner tickets */
+var tFil='ALL';
+var _dT2=drawTix;
+drawTix=function(){
+  var all=TIK;
+  TIK=tFil==='ALL'?all:all.filter(function(t){ return (t.from||'partner')===tFil; });
+  _dT2();
+  TIK=all;
+  var nC=all.filter(function(t){return t.from==='customer';}).length;
+  var nP=all.length-nC;
+  $('tX').insertAdjacentHTML('afterbegin',
+    '<div class="tabs">'+
+    '<span class="'+(tFil==='ALL'?'on':'')+'" onclick="tFil=\'ALL\';drawTix()">सब ('+all.length+')</span>'+
+    '<span class="'+(tFil==='partner'?'on':'')+'" onclick="tFil=\'partner\';drawTix()">🧑‍🔧 Partner ('+nP+')</span>'+
+    '<span class="'+(tFil==='customer'?'on':'')+'" onclick="tFil=\'customer\';drawTix()">🛒 Customer शिकायत ('+nC+')</span></div>');
+};
+console.log('%c 👑 ADMIN v2.0 — TRACKING + BLOCK + ALERTS ✅ ','background:#e53935;color:#fff;font-weight:bold;padding:3px;');
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 4 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([4, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 5 ═══ */
+try {
+/* ═══════════════ ADMIN v3.0 — 📢 BROADCAST / OFFER / INCENTIVE / NOTICE MANAGER ═══════════════ */
+(function(){
+  if(window.__vA30) return; window.__vA30=1;
+  var VG=['linear-gradient(135deg,#ff6b00,#ffa53d)','linear-gradient(135deg,#7b1fa2,#e91e63)','linear-gradient(135deg,#0d47a1,#00bcd4)','linear-gradient(135deg,#0f9d45,#2bc96e)','linear-gradient(135deg,#1a1030,#4a2408)','linear-gradient(135deg,#e53935,#ff9800)'];
+  var VEM={'banner':'📢','offer':'🏷️','incentive':'🎁','notice':'📣','update':'🆕'};
+  var VTX={'banner':'🪧 Banner','offer':'🛍️ Offer','incentive':'💰 Incentive','notice':'📣 Notice','update':'🆕 Update'};
+  var vAB=[], vABL=false, vAEditId=null;
+  function esc2(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+  function gd(i){ return VG[Math.abs(i||0)%VG.length]; }
+  function em(b){ return (b&&b.emoji)?b.emoji:(VEM[b.type]||'📢'); }
+  /* ─── nav + section ─── */
+  function inj(){
+    var nav=document.querySelector('.nv');
+    if(nav&&!document.getElementById('bA')) nav.insertAdjacentHTML('beforeend','<button onclick="tab(\'A\',this)"><i>📢</i>Announce<span class="bdg" id="bA"></span></button>');
+    var wrap=document.querySelector('.wrap');
+    if(wrap&&!document.getElementById('secA')) wrap.insertAdjacentHTML('beforeend','<div class="sec" id="secA"></div>');
+    if(document.getElementById('secA')&&!document.getElementById('vAF')) vABuild();
+  }
+  function vABuild(){
+    var s=document.getElementById('secA'); if(!s) return;
+    s.innerHTML=
+      '<div class="tt">📢 नया Announcement / Offer / Incentive भेजें</div>'+
+      '<div class="cd"><div style="font-size:11.5px;font-weight:800;color:#ffd60a;" id="vASt">🆕 नया message — app (Customer/Partner) पर तुरंत LIVE जाएगा</div>'+
+      '<input id="abT" placeholder="Title — जैसे: मॉनसून ऑफर! 🎉">'+
+      '<textarea id="abM" rows="3" placeholder="पूरा message लिखें..." style="resize:none;"></textarea>'+
+      '<div style="display:flex;gap:8px;">'+
+      '<select id="abTy" style="flex:1;">'+['banner','offer','incentive','notice','update'].map(function(t){return '<option value="'+t+'">'+(VTX[t]||t)+'</option>';}).join('')+'</select>'+
+      '<select id="abTo" style="flex:1;"><option value="all">👥 सबके लिए</option><option value="customer">🛒 Customer app</option><option value="partner">🧑‍🔧 Partner app</option></select></div>'+
+      '<input id="abEm" placeholder="Emoji (optional) — जैसे 🎉" maxlength="4">'+
+      '<div><span style="font-size:10px;color:#8a94ab;font-weight:800;">🎨 रंग चुनें:</span>'+
+      '<div>'+(VG.map(function(g,i){return '<input type="radio" name="abG" id="abG'+i+'" value="'+i+'" '+(i===0?'checked':'')+'><label class="vg" for="abG'+i+'" style="background:'+g+'"></label>';}).join(''))+'</div></div>'+
+      '<div class="rw" style="margin-top:8px;"><span style="font-size:11px;font-weight:800;color:#aab6cf;">🟢 Active (app पर दिखे)</span><input type="checkbox" id="abOn" checked style="width:auto;margin:0;transform:scale(1.4)"></div>'+
+      '<div style="font-size:10px;color:#8a94ab;font-weight:800;margin-top:8px;">लाइव Preview:</div><div class="prev" id="abPrev" style="background:'+VG[0]+';"><div class="pvx"></div><div style="font-size:24px;">📢</div><div style="font-weight:900;font-size:14px;" id="abPvT">Offer title</div><div style="font-size:11px;opacity:.9;font-weight:700;" id="abPvM">Message preview...</div></div>'+
+      '<div class="rw" style="margin-top:12px;"><button class="bn gy" onclick="vAReset()">🧹 नया / Reset</button><button class="bn o" style="flex:2;" onclick="vASav()">📤 Publish / Update करें</button></div></div>'+
+      '<div class="tt">📚 Messages रखे हुए (LIVE / बंद)</div><div id="vAL"><div class="em">लोड हो रहा है...</div></div>';
+    var abT=document.getElementById('abT'), abM=document.getElementById('abM');
+    function lv(){
+      var g=document.querySelector('input[name="abG"]:checked'); var gi=g?parseInt(g.value,10):0;
+      var ty=document.getElementById('abTy').value, ej=document.getElementById('abEm').value.trim()||(VEM[ty]||'📢');
+      document.getElementById('abPrev').style.background=gd(gi);
+      document.getElementById('abPrev').innerHTML='<div class="pvx"></div><div style="font-size:24px;">'+esc2(ej)+'</div><div style="font-weight:900;font-size:14px;" id="abPvT">'+esc2(abT.value||'Title')+'</div><div style="font-size:11px;opacity:.9;font-weight:700;" id="abPvM">'+esc2(abM.value||'Message preview...')+'</div>';
+    }
+    ['abT','abM','abTy','abEm'].forEach(function(id){ var el=document.getElementById(id); el.addEventListener('input',lv); el.addEventListener('change',lv); });
+  }
+  function vASav(){
+    var t=(document.getElementById('abT').value||'').trim();
+    var m=(document.getElementById('abM').value||'').trim();
+    if(t.length<3) return toast('❌ Title लिखें');
+    if(m.length<5) return toast('❌ Message लिखें');
+    var g=document.querySelector('input[name="abG"]:checked');
+    var gi=g?parseInt(g.value,10):0;
+    var doc={ title:t, msg:m, type:document.getElementById('abTy').value, to:document.getElementById('abTo').value,
+      grad:gi, emoji:(document.getElementById('abEm').value||'').trim()||(VEM[document.getElementById('abTy').value]||'📢'),
+      active:document.getElementById('abOn').checked };
+    var st=document.getElementById('vASt');
+    ldr();
+    if(vAEditId){ FS.collection('broadcasts').doc(vAEditId).update(doc).then(function(){ ldrX(); vAEditId=null; toast('✅ Message update + LIVE हो गया!'); vAReset(); }).catch(function(e){ ldrX(); toast('❌ '+e.message); }); }
+    else{
+      doc.ts=Date.now(); doc.at=new Date().toLocaleString('en-IN'); doc.by=(ADMIN_EMAIL||'');
+      FS.collection('broadcasts').add(doc).then(function(){ ldrX(); toast('📤 भेज दिया — apps पर LIVE! 🎉'); vAReset(); }).catch(function(e){ ldrX(); toast('❌ '+e.message); });
+    }
+  }
+  function vAReset(){
+    vAEditId=null;
+    var s=document.getElementById('secA'); if(!s) return;
+    vABuild();
+    try{ var l=document.getElementById('vAL'); if(l) vAList(); }catch(e){}
+  }
+  function vAEdit(id){
+    var b=null; vAB.forEach(function(x){ if(x._id===id) b=x; });
+    if(!b) return;
+    vAEditId=id;
+    document.getElementById('vASt').innerHTML='✏️ EDIT: <b>'+esc2(b.title)+'</b> — नीचे बदलकर Update दबाएँ <span style="color:#8a94ab;">(ID: '+id+')</span>';
+    document.getElementById('abT').value=b.title||'';
+    document.getElementById('abM').value=b.msg||'';
+    document.getElementById('abTy').value=b.type||'banner';
+    document.getElementById('abTo').value=b.to||'all';
+    document.getElementById('abEm').value=b.emoji||'';
+    document.getElementById('abOn').checked=!!b.active;
+    var radios=document.querySelectorAll('input[name="abG"]');
+    for(var i=0;i<radios.length;i++) radios[i].checked=(i===(Number(b.grad)||0)%VG.length);
+    try{ document.querySelector('#secA .wrap2, #secA').scrollIntoView({behavior:'smooth'}); }catch(e){}
+    toast('✏️ Edit mode — Save के बजाय Update होगा');
+  }
+  function vATog(id){
+    var b=null; vAB.forEach(function(x){ if(x._id===id) b=x; });
+    if(!b) return;
+    FS.collection('broadcasts').doc(id).update({active:!b.active}).then(function(){ toast(!b.active?'🟢 LIVE कर दिया':'⚫ बंद कर दिया'); }).catch(function(e){ toast('❌ '+e.message); });
+  }
+  function vADel(id){
+    swUi.confirm({icon:'🗑️',title:'Message Delete',msg:'यह message हमेशा के लिए delete होगा? Apps से तुरंत हट जाएगा।',ok:'हाँ, Delete',cancel:'रुकें',danger:true,onOk:function(){
+      FS.collection('broadcasts').doc(id).delete().then(function(){ toast('🗑️ Delete हो गया'); }).catch(function(e){ toast('❌ '+e.message); });
+    }});
+  }
+  function vAList(){
+    var l=document.getElementById('vAL'); if(!l) return;
+    if(!vAB.length){ l.innerHTML='<div class="em">अभी कोई message नहीं — ऊपर से भेजें 📤</div>'; return; }
+    l.innerHTML=vAB.map(function(b){
+      return '<div class="cd"><div class="rw"><b style="font-size:12px;">'+em(b)+' '+esc2(b.title||'')+'</b><span class="ch" style="background:'+gd(b.grad)+';color:#fff;">'+esc2(VTX[b.type]||b.type)+'</span></div>'+
+      '<div class="mut" style="margin:5px 0 8px;">'+esc2(String(b.msg||'').slice(0,120))+'</div>'+
+      '<div class="rw"><div class="mut">👥 '+esc2(b.to==='all'?'सब':b.to==='customer'?'Customer':b.to==='partner'?'Partner':'')+' • '+ago(b.ts||b.t_edit)+'</div>'+
+      '<div style="display:flex;gap:5px;flex-wrap:wrap;">'+
+      '<button class="bn '+(b.active?'g':'gy')+'" onclick="vATog(\''+b._id+'\')">'+(b.active?'🟢 LIVE':'⚫ बंद')+'</button>'+
+      '<button class="bn o" onclick="vAEdit(\''+b._id+'\')">✏️ Edit</button>'+
+      '<button class="bn r" onclick="vADel(\''+b._id+'\')">🗑️</button></div></div></div>';
+    }).join('');
+  }
+  function listen(){
+    if(vABL) return; vABL=true;
+    try{
+      FS.collection('broadcasts').limit(30).onSnapshot(function(s){
+        vAB=s.docs.map(function(d){ var b=d.data(); b._id=d.id; return b; }).sort(function(a,b2){ return (b2.ts||0)-(a.ts||0); });
+        var st=document.getElementById('vASt'); if(st&&!vAEditId) st.innerHTML='🆕 नया message — app (Customer/Partner) पर तुरंत LIVE जाएगा';
+        vAList();
+        var e=document.getElementById('bA');
+        if(e){ var n=vAB.filter(function(b){return b.active;}).length; e.style.display=n?'flex':'none'; e.innerText=n; }
+        if(document.getElementById('secA')&&document.getElementById('secA').classList.contains('act')) vAList();
+      },function(){});
+    }catch(e){}
+  }
+  /* ─── re-wire tab ─── */
+  function tab(t,btn){
+    ['D','O','P','K','M','T','A'].forEach(function(x){ var e=document.getElementById('sec'+x); if(e) e.classList.remove('act'); });
+    var se=document.getElementById('sec'+t); if(se) se.classList.add('act');
+    document.querySelectorAll('.nv button').forEach(function(b){ b.classList.remove('act'); });
+    if(btn) btn.classList.add('act');
+    if(t==='M') drawMoney();
+    if(t==='T') drawTix();
+    if(t==='A'){ vAList(); }
+  }
+  /* expose */
+  window.vASav=vASav; window.vAReset=vAReset; window.vAEdit=vAEdit; window.vATog=vATog; window.vADel=vADel; window.vAList=vAList;
+  window.tab=tab;
+  /* start */
+  function tryBoot(){
+    try{
+      if(!firebase.auth().currentUser) return false;
+      if((firebase.auth().currentUser.email||'').toLowerCase()!==ADMIN_EMAIL) return false;
+      inj(); listen();
+      return true;
+    }catch(e){ return false; }
+  }
+  if(!tryBoot()){ var ti=setInterval(function(){ if(tryBoot()) clearInterval(ti); },800); }
+  console.log('%c 📢 ADMIN v3.0 — BROADCAST MANAGER ✅ ','background:#ff6b00;color:#fff;font-weight:bold;padding:3px;');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 5 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([5, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 6 ═══ */
+try {
+/* ═══════════════ ADMIN v3.1 — SUNDER CONFIRM (Delete/Block/Broadcast) ═══════════════ */
+(function(){
+  if(window.__a31) return; window.__a31=1;
+  function escA(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+  function aConfirm(msg,o){
+    o=o||{};
+    var ov=document.getElementById('aCOv');
+    if(!ov){ ov=document.createElement('div'); ov.id='aCOv'; document.body.appendChild(ov); }
+    ov.innerHTML='<div class="acard"><div class="ach"><div class="ai">'+escA(o.ic||'⚠️')+'</div><div class="at">'+escA(o.t||'पक्का?')+'</div></div><div class="acb"><div class="acm">'+escA(String(msg==null?'':msg)).replace(/\n/g,'<br>')+'</div><div class="acrw"><button class="ano" id="aCNo">✕ '+(o.no||'नहीं')+'</button><button class="ayes '+(o.danger?'danger':'')+'" id="aCYes">'+(o.ok||'✅ हाँ')+'</button></div></div></div>';
+    ov.classList.add('on');
+    return new Promise(function(res){
+      document.getElementById('aCYes').onclick=function(){ ov.classList.remove('on'); res(true); };
+      document.getElementById('aCNo').onclick=function(){ ov.classList.remove('on'); res(false); };
+    });
+  }
+  window.aConfirm=aConfirm;
+
+  /* Order Delete */
+  window.oDel=function(id){
+    aConfirm('पक्का DELETE? वापस नहीं आएगा!',{ic:'🗑️',t:'Delete Order',ok:'हाँ, delete करें',danger:true}).then(function(ok){
+      if(!ok) return;
+      ldr();
+      FS.collection('orders').doc(id).delete().then(function(){ ldrX(); toast('🗑️ Deleted'); shClose(); }).catch(function(e){ ldrX(); toast('❌ '+e.message); });
+    });
+  };
+  /* Block */
+  window.pBlock=function(ph,flag){
+    if(flag){
+      aConfirm('पक्का BLOCK करें? Partner app तुरंत लॉक हो जाएगा!',{ic:'⛔',t:'Block Partner',ok:'हाँ, BLOCK करें',danger:true}).then(function(ok){
+        if(!ok) return;
+        doBlock(ph,true);
+      });
+    } else doBlock(ph,false);
+    function doBlock(ph2,fl){
+      ldr();
+      SWSec.call('setPartnerBlocked',{phone:ph2,blocked:fl})
+      .then(function(){ ldrX(); toast(fl?'⛔ BLOCKED — partner लॉक हो गया':'✅ UNBLOCK — partner फिर चालू'); shClose(); })
+      .catch(function(e){ ldrX(); toast('❌ '+e.message); });
+    }
+  };
+  /* Broadcast delete */
+  window.vADel=function(id){
+    aConfirm('यह message हमेशा के लिए delete होगा? Apps से तुरंत हट जाएगा।',{ic:'🗑️',t:'Delete Message',ok:'हाँ, delete करें',danger:true}).then(function(ok){
+      if(!ok) return;
+      FS.collection('broadcasts').doc(id).delete().then(function(){ toast('🗑️ Delete हो गया'); }).catch(function(e){ toast('❌ '+e.message); });
+    });
+  };
+  console.log('%c 🔔 ADMIN v3.1 — SUNDER CONFIRM ✅ ','background:#e53935;color:#fff;font-weight:bold;padding:3px;');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 6 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([6, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 7 ═══ */
+try {
+/* ═══════════════ ADMIN v3.2 — 🧾 GST % BILL SETTING (config/global) ═══════════════ */
+(function(){
+  if(window.__a32) return; window.__a32=1;
+  var gG=0, gInited=false;
+  function gstFill(){
+    var el=document.getElementById('gstIn');
+    if(el && document.activeElement!==el) el.value=gG;
+  }
+  function gstCard(){
+    var host=document.getElementById('secD'); if(!host) return;
+    if(!document.getElementById('gstCard')){
+      host.insertAdjacentHTML('afterbegin',
+      '<div class="cd" id="gstCard" style="border-color:#2a1d45;">'+
+        '<div class="rw"><b style="font-size:12.5px;">🧾 Bill GST %</b><span class="gold">BILL SETTING</span></div>'+
+        '<div style="font-size:10.5px;color:#aab6cf;font-weight:700;margin-top:4px;">Customer के 🧾 Bill/Invoice पर GST दिखेगा — यहाँ से % बदलो, Save दबाओ, सबको live लागू होगा</div>'+
+        '<div style="display:flex;gap:8px;align-items:center;margin-top:8px;">'+
+          '<input id="gstIn" type="number" min="0" max="28" style="width:120px;text-align:center;font-weight:900;" placeholder="GST %">'+
+          '<button class="bn o" onclick="gstSave()">💾 Save</button>'+
+        '</div>'+
+        '<div style="margin-top:8px;">'+[0,5,12,18].map(function(v){
+          return '<span style="display:inline-block;margin:2px;font-size:10px;font-weight:800;border-radius:16px;padding:4px 11px;background:#0f1626;border:1px solid var(--bd);color:#c6cbdb;cursor:pointer;" onclick="gstSet('+v+')">'+(v?v+'%':'0% (बिना)')+'</span>';
+        }).join('')+'</div>'+
+        '<div style="font-size:10px;color:#8a94ab;font-weight:800;margin-top:7px;">ℹ️ GST amount = (Subtotal − Discount) × GST% — Bill में "included" दिखेगा। Cash ऑर्डर पर QR नहीं, सिर्फ Online पर QR।</div>'+
+      '</div>');
+    }
+    gstFill();
+  }
+  window.gstSet=function(v){ gG=Number(v)||0; gstFill(); };
+  window.gstSave=function(){
+    var el=document.getElementById('gstIn'); if(!el) return;
+    var v=Math.max(0, Math.min(28, parseInt(el.value||'0',10)||0));
+    ldr();
+    FS.collection('config').doc('global').set({gstPct:v, updatedAt:Date.now(), by:ADMIN_EMAIL||''},{merge:true})
+      .then(function(){ ldrX(); gG=v; toast('✅ GST '+v+'% save — customer bill पर live apply'); })
+      .catch(function(e){ ldrX(); toast('❌ '+e.message); });
+  };
+  /* live listen */
+  try{
+    FS.collection('config').doc('global').onSnapshot(function(d){ gG=(d.exists? (Number(d.data().gstPct)||0):0); gstFill(); },function(){});
+  }catch(e){}
+  /* drawDash wrap → card + list refresh */
+  var _dd3=drawDash;
+  drawDash=function(){ _dd3(); gstCard(); };
+  console.log('%c 🧾 ADMIN v3.2 — GST BILL SETTING ✅ ','background:#7b1fa2;color:#fff;font-weight:bold;padding:3px;');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 7 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([7, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 8 ═══ */
+try {
+/* ═══════════════ ADMIN v3.3 — 🗂️ CATALOGUE / PRICE LIST (photo + rate, har category) ═══════════════ */
+(function(){
+  if(window.__a33) return; window.__a33=1;
+  var vCats=[], vSrv={}, vCCat='';
+  function esc3(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+  function slug(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'').slice(0,14)||('cat'+Date.now().toString().slice(-4)); }
+
+  function inj(){
+    var nav=document.querySelector('.nv');
+    if(nav && !document.getElementById('bC')) nav.insertAdjacentHTML('beforeend','<button onclick="tab(\'C\',this)"><i>🗂️</i>Price List</button>');
+    var wrap=document.querySelector('.wrap');
+    if(wrap && !document.getElementById('secC')) wrap.insertAdjacentHTML('beforeend','<div class="sec" id="secC"></div>');
+    if(document.getElementById('secC') && !document.getElementById('vCF')) build();
+  }
+  function build(){
+    var s=document.getElementById('secC'); if(!s) return;
+    s.innerHTML=
+    '<div class="tt">🗂️ Category + Service Price List — यहाँ से Admin सब rates/photos update करता है (Customer app पर तुरंत LIVE)</div>'+
+    '<div class="cd">'+
+      '<div class="rw"><b style="font-size:12.5px;">🏷️ Categories</b><button class="bn gy" onclick="vCAddCat()">+ नई Category</button></div>'+
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:9px;" id="vCatChips"></div>'+
+      '<div style="display:flex;gap:8px;align-items:center;margin-top:10px;border-top:1px dashed var(--bd);padding-top:10px;">'+
+        '<span style="font-size:11px;font-weight:800;color:#aab6cf;">Visit fee (₹):</span><input id="vCVisit" type="number" min="0" style="width:80px;text-align:center;font-weight:900;">'+
+        '<button class="bn o" style="margin-top:0;" onclick="vCSaveCatFee()">💾 Save fee</button>'+
+      '</div>'+
+    '</div>'+
+    '<div class="cd"><div class="rw"><b style="font-size:12.5px;">🛠️ Services / Items (photo + rate)</b><span class="mut" id="vCSelName">—</span></div>'+
+      '<div class="tt" style="margin:8px 0 6px;">➕ नया item / service</div>'+
+      '<input id="vCN" placeholder="Item नाम — जैसे: Split AC Deep Clean">'+
+      '<input id="vCP" type="number" min="0" placeholder="आधार rate ₹ — जैसे 499">'+
+      '<input id="vCI" placeholder="Photo URL (image link) — खाली रखो तो default photo">'+
+      '<textarea id="vCO" rows="2" placeholder="विकल्प (हर line पर एक) — जैसे:\nFoam Jet Technology (+₹150)\nAnti-Bacterial Coil (+₹100)" style="resize:none;"></textarea>'+
+      '<div class="rw" style="margin-top:10px;"><button class="bn r" style="background:#222b40;color:#ff8a80;border:1px solid #3a3045;" onclick="vCClear()">🧹 Clear</button>'+
+      '<button class="bn o" style="flex:2;margin-top:0;" onclick="vCSaveSrv()">💾 Save Item (add/update)</button></div>'+
+    '</div>'+
+    '<div class="tt">📃 इस category के items (edit/delete — tap ✏️)</div><div id="vCList"><div class="em">Category चुनो</div></div>';
+    renderChips();
+  }
+  function renderChips(){
+    var c=document.getElementById('vCatChips'); if(!c) return;
+    c.innerHTML=vCats.map(function(x){
+      return '<span style="display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:20px;font-size:11px;font-weight:800;cursor:pointer;border:1px solid '+(x.key===vCCat?'var(--pr)':'var(--bd)')+';background:'+(x.key===vCCat?'rgba(255,107,0,.15)':'#0f1626')+';color:'+(x.key===vCCat?'var(--pr)':'#c6cbdb')+';" onclick="vCCat(\''+x.key+'\')">'+(x.icon?x.icon+' ':'')+esc3(x.name)+(x.fee?' <span style="color:#ffd60a;">₹'+x.fee+'</span>':'')+'</span>';
+    }).join('')||'<span class="mut">कोई category नहीं — + नई Category दबाओ</span>';
+  }
+  function pickCat(key){ vCCat=key; var x=vCats.find(function(c){return c.key===key;}); var e=document.getElementById('vCSelName'); if(e) e.innerText=x?('● '+x.name):key; var vf=document.getElementById('vCVisit'); if(vf&&x) vf.value=x.fee||''; renderChips(); listSrv(); }
+  window.vCCat=pickCat;
+  window.vCAddCat=function(){
+    swUi.prompt({icon:'🗂️',title:'नई Category',msg:'नई Category का नाम (जैसे: RO Service):',ph:'नाम…',ok:'आगे →',cancel:'रद्द',onOk:function(nmv){
+      var nm=String(nmv==null?'':nmv).trim(); if(!nm){ return; }
+      swUi.prompt({icon:'😀',title:'Category Icon',msg:'Icon emoji (जैसे: 💧) ya खाली:',ph:'emoji',ok:'✅ Category बनाएँ',cancel:'रद्द',onOk:function(icv){
+        var ic=String(icv==null?'':icv);
+        var key=slug(nm);
+        vCats.push({key:key,name:nm,icon:(ic||'').trim(),fee:0}); if(!vSrv[key]) vSrv[key]=[];
+        vCCat=key; renderChips(); listSrv(); saveAll('✅ Category जुड़ गई — अब items डालो');
+      }});
+    }});
+  };
+  window.vCSaveCatFee=function(){
+    if(!vCCat) return toast('❌ पहले category चुनो');
+    var f=Math.max(0,parseInt((document.getElementById('vCVisit').value)||'0',10)||0);
+    vCats.forEach(function(c){ if(c.key===vCCat) c.fee=f; });
+    renderChips(); saveAll('✅ Visit fee ₹'+f+' save — '+vCCat);
+  };
+  window.vCClear=function(){ ['vCN','vCP','vCI','vCO'].forEach(function(i){ var e=document.getElementById(i); if(e) e.value=''; }); };
+  function fill(o){
+    document.getElementById('vCN').value=o.n||'';
+    document.getElementById('vCP').value=o.p||'';
+    document.getElementById('vCI').value=o.i||'';
+    document.getElementById('vCO').value=(o.subOptions||[]).join('\n');
+  }
+  window.vCEdit=function(idx){
+    var o=(vSrv[vCCat]||[])[idx]; if(!o) return;
+    fill(o); window.__vSrvIdx=idx;
+    toast('✏️ Edit mode — नीचे बदलो, Save Item दबाओ');
+    try{ document.getElementById('secC').scrollIntoView({behavior:'smooth'}); }catch(e){}
+  };
+  window.vCSaveSrv=function(){
+    if(!vCCat) return toast('❌ पहले category चुनो');
+    var n=(document.getElementById('vCN').value||'').trim();
+    var p=parseInt((document.getElementById('vCP').value||'0'),10);
+    var i=(document.getElementById('vCI').value||'').trim();
+    var oLines=(document.getElementById('vCO').value||'').split('\n').map(function(x){return x.trim();}).filter(Boolean);
+    if(!n) return toast('❌ Item नाम लिखो');
+    if(!(p>=0)) p=0;
+    var obj={n:n,p:p,i:(i||'https://cdn-icons-png.flaticon.com/512/1046/1046784.png'),subOptions:oLines};
+    if(!vSrv[vCCat]) vSrv[vCCat]=[];
+    if(typeof window.__vSrvIdx==='number' && (vSrv[vCCat])[window.__vSrvIdx]) (vSrv[vCCat])[window.__vSrvIdx]=obj;
+    else (vSrv[vCCat]).push(obj);
+    window.__vSrvIdx=null;
+    listSrv(); saveAll('✅ "'+n+'" save — customer app पर live!');
+  };
+  window.vCDel=function(idx){
+    swUi.confirm({icon:'🗑️',title:'Item Delete',msg:'यह item हमेशा delete होगा?',ok:'हाँ, Delete',cancel:'रुकें',danger:true,onOk:function(){
+      (vSrv[vCCat]||[]).splice(idx,1);
+      listSrv(); saveAll('🗑️ Item delete — live update');
+    }});
+  };
+  function listSrv(){
+    var l=document.getElementById('vCList'); if(!l) return;
+    var arr=vSrv[vCCat]||[];
+    if(!arr.length){ l.innerHTML='<div class="em">इस category में अभी कोई item नहीं — ऊपर भरकर Save Item दबाओ</div>'; return; }
+    l.innerHTML=arr.map(function(o,ix){
+      return '<div class="cd" style="display:flex;gap:10px;align-items:center;"><img src="'+esc3(o.i||'')+'" onerror="this.src=\'https://cdn-icons-png.flaticon.com/512/1046/1046784.png\'" style="width:52px;height:52px;border-radius:12px;object-fit:cover;background:#0f1626;">'+
+      '<div style="flex:1;min-width:0;"><b style="font-size:12px;">'+esc3(o.n)+'</b><div style="font-size:11px;font-weight:800;color:#ffd60a;margin-top:2px;">₹'+(o.p||0)+(o.subOptions&&o.subOptions.length?(' • '+o.subOptions.length+' विकल्प'):'')+'</div></div>'+
+      '<div style="display:flex;gap:5px;"><button class="bn b" style="padding:7px 11px;margin:0;" onclick="vCEdit('+ix+')">✏️</button><button class="bn r" style="padding:7px 11px;margin:0;" onclick="vCDel('+ix+')">🗑️</button></div></div>';
+    }).join('');
+  }
+  function saveAll(tip){
+    ldr();
+    FS.collection('app_config').doc('main').set({
+      categoriesData: JSON.stringify(vCats),
+      mainData: JSON.stringify(vSrv),
+      updatedAt: Date.now(), by: ADMIN_EMAIL||''
+    },{merge:true}).then(function(){
+      ldrX(); if(tip) toast(tip);
+    }).catch(function(e){ ldrX(); toast('❌ '+e.message); });
+  }
+  function loadCloud(){
+    ldr();
+    FS.collection('app_config').doc('main').get().then(function(d){
+      if(d.exists){
+        var x=d.data();
+        try{ vCats=JSON.parse(x.categoriesData||'[]'); }catch(e){ vCats=[]; }
+        try{ vSrv=JSON.parse(x.mainData||'{}'); }catch(e){ vSrv={}; }
+      }
+      if(!vCats.length){ vCats=[{key:'mobile',name:'Mobile',icon:'📱',fee:0}]; vSrv.mobile=vSrv.mobile||[]; }
+      if(!vCCat && vCats.length) vCCat=vCats[0].key;
+      ldrX(); renderChips(); listSrv();
+      var vf=document.getElementById('vCVisit'); var x0=vCats.find(function(c){return c.key===vCCat;}); if(vf&&x0) vf.value=x0.fee||'';
+      var e=document.getElementById('vCSelName'); if(e&&x0) e.innerText='● '+x0.name;
+    }).catch(function(e){ ldrX(); toast('⚠️ '+e.message); });
+  }
+  function live(){
+    FS.collection('app_config').doc('main').onSnapshot(function(d){
+      if(!d.exists) return;
+      var x=d.data();
+      try{ var c2=JSON.parse(x.categoriesData||'null'); if(c2) vCats=c2; }catch(e){}
+      try{ var s2=JSON.parse(x.mainData||'null'); if(s2) vSrv=s2; }catch(e){}
+      if(!vCCat&&vCats.length) vCCat=vCats[0].key;
+      renderChips(); listSrv();
+    },function(){});
+  }
+  /* expose + tab hook */
+  window.vCFLoad=loadCloud;
+  var _t33=tab;
+  tab=function(t,btn){ _t33(t,btn); if(t==='C'){ if(!vCats.length) loadCloud(); else { renderChips(); listSrv(); } } };
+  window.tab=tab;
+  function bootA(){
+    try{
+      if(!firebase.auth().currentUser) return;
+      if((firebase.auth().currentUser.email||'').toLowerCase()!==ADMIN_EMAIL) return;
+      inj(); live(); loadCloud();
+    }catch(e){}
+  }
+  if(!window.__a33b){ window.__a33b=1; var ti=setInterval(function(){ try{ bootA(); if(firebase.auth().currentUser) clearInterval(ti); }catch(e){} },700); }
+  console.log('%c 🗂️ ADMIN v3.3 — PRICE LIST / CATALOGUE ✅ ','background:#1976d2;color:#fff;font-weight:bold;padding:3px;');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 8 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([8, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 9 ═══ */
+try {
+/* ═══════════════ ADMIN v3.4 — SINGLE-SECTION TABS + GALLERY PHOTOS + CATEGORY/BANNER MANAGER + SERVICE RATINGS + CUSTOMER PAYOUTS ═══════════════ */
+(function(){
+  if(window.__a34) return; window.__a34=1;
+  function e34(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+
+  /* ═══ 1) TAB FIX — footer icon पर क्लिक → सिर्फ वही section ═══ */
+  try{
+    window.tab=function(t,btn){
+      var secs=document.querySelectorAll('.sec');
+      for(var i=0;i<secs.length;i++) secs[i].classList.remove('act');
+      var se=document.getElementById('sec'+t); if(se) se.classList.add('act');
+      var bs=document.querySelectorAll('.nv button');
+      for(var j=0;j<bs.length;j++) bs[j].classList.remove('act');
+      if(btn) btn.classList.add('act');
+      try{ if(t==='M') drawMoney(); }catch(e){}
+      try{ if(t==='T') drawTix(); }catch(e){}
+      try{ if(t==='A'&&window.vAList) vAList(); }catch(e){}
+      try{ if(t==='C'){ if(window.vCFLoad) vCFLoad(); aEnhance(); } }catch(e){}
+    };
+  }catch(e){}
+
+  /* ═══ 2) DATA CACHE (app_config main + service ratings) ═══ */
+  var mCats=[], mSrv={}, mBanners=[], rMap={}, rGot=false;
+  function aLoadMain(){
+    FS.collection('app_config').doc('main').get().then(function(d){
+      if(!d.exists) return;
+      var x=d.data();
+      try{ mCats=JSON.parse(x.categoriesData||'[]'); }catch(e){ mCats=[]; }
+      try{ mSrv=JSON.parse(x.mainData||'{}'); }catch(e){ mSrv={}; }
+      try{ mBanners=JSON.parse(x.bannersData||'[]'); }catch(e){ mBanners=[]; }
+      aEnhance();
+    }).catch(function(){});
+  }
+  function aSubMain(){
+    try{
+      FS.collection('app_config').doc('main').onSnapshot(function(d){
+        if(!d.exists) return; var x=d.data();
+        try{ mCats=JSON.parse(x.categoriesData||'[]'); }catch(e){ mCats=[]; }
+        try{ mSrv=JSON.parse(x.mainData||'{}'); }catch(e){ mSrv={}; }
+        try{ mBanners=JSON.parse(x.bannersData||'[]'); }catch(e){ mBanners=[]; }
+        aEnhance();
+      },function(){});
+    }catch(e){}
+  }
+  function aSubRates(){
+    try{
+      /* SCALE: पूरी service_ratings (अनबाउंड) की जगह ab per-service aggregate svc_stats */
+      FS.collection('svc_stats').limit(200).onSnapshot(function(s){
+        var m={};
+        s.docs.forEach(function(d){ var x=d.data(); var k=String(x.cat||'')+'|'+String(x.sn||''); if(!m[k]) m[k]={s:0,c:0}; m[k].s+=Number(x.sum)||0; m[k].c+=Number(x.count)||0; });
+        rMap=m; rGot=true; aEnhance();
+      },function(){});
+    }catch(e){}
+  }
+  function aRateLine(k){
+    var r=rMap[k]; if(r&&r.c) return '⭐ '+Math.round(r.s/r.c*10)/10+' ('+r.c+')';
+    return '';
+  }
+
+  /* ═══ 3) GALLERY → compress → dataURL ═══ */
+  window.aImgPick=function(cb){
+    var inp=document.createElement('input'); inp.type='file'; inp.accept='image/*';
+    inp.onchange=function(){
+      var f=inp.files&&inp.files[0]; if(!f) return;
+      var rd=new FileReader();
+      rd.onload=function(ev){
+        var im=new Image();
+        im.onload=function(){
+          try{
+            var mx=520,w=im.width,h=im.height;
+            if(w>mx){ h=h*mx/w; w=mx; }
+            if(h>mx){ w=w*mx/h; h=mx; }
+            var cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+            cv.getContext('2d').drawImage(im,0,0,w,h);
+            var url=cv.toDataURL('image/jpeg',0.72);
+            cb(url);
+          }catch(e){ toast('❌ Photo compress error'); }
+        };
+        im.src=ev.target.result;
+      };
+      rd.readAsDataURL(f);
+    };
+    inp.click();
+  };
+  function aGalBtn(targetId,label){
+    return '<button type="button" class="bn gy a-gal" data-t="'+targetId+'" style="margin:6px 0 0;padding:8px;font-size:11px;">🖼️ '+label+'</button>';
+  }
+  /* delegation: photo picker buttons */
+  document.addEventListener('click',function(ev){
+    var b=ev.target&&ev.target.closest?ev.target.closest('.a-gal'):null;
+    if(!b) return;
+    var tid=b.getAttribute('data-t')||'';
+    aImgPick(function(u){ var t=document.getElementById(tid); if(t) t.value=u; toast('✅ Photo ready — Save दबाएँ'); });
+  });
+
+  /* ═══ 4) PRICE LIST ENHANCER (gallery + category card + banners + ratings) ═══ */
+  window.aEnhance=function(){
+    try{
+      var s=document.getElementById('secC'); if(!s) return;
+      /* photo picker for service URL input */
+      var vci=document.getElementById('vCI');
+      if(vci && !document.getElementById('vCIgal')) vci.insertAdjacentHTML('afterend',aGalBtn('vCI','गैलरी से photo'));
+      /* my extra cards (once) */
+      if(!document.getElementById('aCatsX')){
+        s.insertAdjacentHTML('beforeend',
+        '<div class="cd" id="aCatsX"><div class="rw"><b style="font-size:12.5px;">🖼️ Category Manager (photo/delete)</b><span class="gold">LIVE</span></div>'+
+        '<div style="font-size:10.5px;color:#aab6cf;font-weight:700;margin:4px 0 8px;">Customer के category tiles पर photo dikhti है (emoji भी चलता है)।</div>'+
+        '<div id="aCatsL"></div>'+
+        '<div style="border-top:1px dashed var(--bd);margin-top:9px;padding-top:9px;"><b style="font-size:11.5px;">➕ नई Category (photo सहित)</b>'+
+        '<input id="aNCatN" placeholder="नाम — जैसे: Salon & Spa"><input id="aNCatI" placeholder="Icon emoji (वैकल्पिक) — जैसे 💇">'+
+        aGalBtn('aNCatP','🖼️ Category photo चुनें (वैकल्पिक)')+
+        '<button class="bn o" style="width:100%;margin-top:8px;" onclick="aAddCat()">➕ Category जोड़ें</button></div></div>'+
+        '<div class="cd" id="aBnrX"><div class="rw"><b style="font-size:12.5px;">📣 Home Banners (photo)</b><span class="gold">LIVE</span></div>'+
+        '<div style="font-size:10.5px;color:#aab6cf;font-weight:700;margin:4px 0 8px;">Customer app के top carousel में यहीं के banners दिखते हैं।</div>'+
+        '<div id="aBnrL"></div>'+
+        '<div style="border-top:1px dashed var(--bd);margin-top:9px;padding-top:9px;"><b style="font-size:11.5px;">➕ नया / ✏️ Banner</b>'+
+        '<input id="aBnT" placeholder="Title — जैसे: AC Service 30% OFF"><input id="aBnD" placeholder="Description">'+
+        '<input id="aBnB" placeholder="Background: Photo URL या gradient (नीचे गैलरी से भी)">'+
+        aGalBtn('aBnB','🖼️ गैलरी से banner photo')+
+        '<div class="rw" style="margin-top:8px;"><button class="bn r" style="background:#222b40;color:#ff8a80;" onclick="aBnClear()">🧹 Clear</button><button class="bn o" style="flex:2;margin-top:0;" onclick="aBnSave()">💾 Banner Save</button></div></div></div>'
+        );
+        setTimeout(function(){ aFillCats(); aFillBnr(); },150);
+      }
+      aFillCats(); aFillBnr();
+      /* service ratings inject (rows उसी क्रम में हैं जैसे mSrv[cat]) */
+      try{
+        var l=document.getElementById('vCList'); if(l&&rGot){
+          var selTxt=((document.getElementById('vCSelName')||{}).innerText||'').replace('● ','').trim();
+          var cc2=null; for(var ci=0;ci<mCats.length;ci++) if(mCats[ci].name===selTxt) cc2=mCats[ci].key;
+          if(!cc2) cc2=selTxt;
+          var items=(mSrv&&mSrv[cc2])||[];
+          var rows2=l.querySelectorAll('.cd');
+          for(var ri=0;ri<rows2.length;ri++){
+            var row=rows2[ri];
+            if(!row||row.querySelector('.aRate')) continue;
+            var it=items[ri];
+            var rl=it?aRateLine(cc2+'|'+it.n):'';
+            if(rl&&it){
+              try{
+                var b2=null; for(var q=0;q<row.children.length;q++){ if(row.children[q].tagName==='B'){ b2=row.children[q]; break; } }
+                var nmEl=row.querySelector('b');
+                (nmEl).insertAdjacentHTML('afterend','<div class="aRate" style="font-size:10px;color:#f5a623;font-weight:900;margin-top:2px;">'+rl+'</div>');
+              }catch(e){}
+            }
+          }
+        }
+      }catch(e){}
+    }catch(e){}
+  };
+
+  /* category manager body */
+  function aFillCats(){
+    var h=document.getElementById('aCatsL'); if(!h) return;
+    if(!mCats.length){ h.innerHTML='<div class="em">कोई category नहीं — ऊपर v3.3 में या नीचे add करें</div>'; return; }
+    h.innerHTML=mCats.map(function(c,i){
+      return '<div style="display:flex;align-items:center;gap:9px;border:1px solid var(--bd);border-radius:12px;padding:8px 10px;margin-bottom:6px;background:#0f1626;">'+
+        (c.img?'<img src="'+e34(c.img)+'" style="width:40px;height:40px;border-radius:10px;object-fit:cover;background:#111a2b;">':'<span style="width:40px;height:40px;border-radius:10px;background:#111a2b;display:flex;align-items:center;justify-content:center;font-size:20px;">'+(/[\u0080-\uFFFF]/.test(String(c.icon||''))?c.icon:'📦')+'</span>')+
+        '<div style="flex:1;min-width:0;"><b style="font-size:11.5px;">'+e34(c.name)+'</b><div style="font-size:9px;color:#8a94ab;font-weight:700;">'+e34(c.key)+(c.fee?' • fee ₹'+c.fee:'')+'</div></div>'+
+        '<button class="bn b" style="padding:7px 10px;margin:0;font-size:11px;" onclick="aCatPhoto('+i+')">📷</button>'+
+        '<button class="bn r" style="padding:7px 10px;margin:0;font-size:11px;" onclick="aCatDel('+i+')">🗑️</button></div>';
+    }).join('');
+  }
+  window.aCatPhoto=function(i){
+    var c=mCats[i]; if(!c) return;
+    aImgPick(function(u){
+      c.img=u;
+      aSaveCats('✅ Category photo save — customer tiles live!');
+    });
+  };
+  window.aCatDel=function(i){
+    var c=mCats[i]; if(!c) return;
+    aAsk('🗑️','Category "'+c.name+'" (उसके items सहित) हमेशा delete हो जाएगी?',function(ok){
+      if(!ok) return;
+      mCats.splice(i,1); delete mSrv[c.key];
+      aSaveCats('🗑️ Category delete हो गई');
+    });
+  };
+  window.aAddCat=function(){
+    var n=(document.getElementById('aNCatN')||{value:''}).value.trim();
+    if(!n) return toast('❌ नाम लिखें');
+    var ic=(document.getElementById('aNCatI')||{value:''}).value.trim();
+    var img=(document.getElementById('aNCatP')||{value:''}).value;
+    var key=String(n).toLowerCase().replace(/[^a-z0-9]+/g,'').slice(0,14)||('cat'+Date.now().toString().slice(-4));
+    if(mCats.some(function(c){return c.key===key;})) return toast('❌ यह key पहले से है');
+    mCats.push({key:key,name:n,icon:ic,fee:0}); if(img) mCats[mCats.length-1].img=img;
+    if(!mSrv[key]) mSrv[key]=[];
+    aSaveCats('✅ "'+n+'" जुड़ गई');
+  };
+  function aSaveCats(tip){
+    ldr();
+    FS.collection('app_config').doc('main').set({
+      categoriesData:JSON.stringify(mCats), mainData:JSON.stringify(mSrv), updatedAt:Date.now(), by:ADMIN_EMAIL||''
+    },{merge:true}).then(function(){ ldrX(); toast(tip); aFillCats(); try{ vCFLoad&&vCFLoad(); }catch(e){} }).catch(function(e){ ldrX(); toast('❌ '+e.message); });
+  }
+
+  /* banner manager */
+  function aFillBnr(){
+    var h=document.getElementById('aBnrL'); if(!h) return;
+    if(!mBanners.length){ h.innerHTML='<div class="em">अभी कोई banner नहीं — नीचे बनाएँ</div>'; return; }
+    h.innerHTML=mBanners.map(function(b,i){
+      var bg=b.bg;
+      var thumb=bg&&bg.indexOf('data:')===0?'<img src="'+e34(bg)+'" style="width:64px;height:40px;border-radius:8px;object-fit:cover;">':(bg&&bg.indexOf('http')===0?'<img src="'+e34(bg)+'" onerror="this.style.display=\'none\'" style="width:64px;height:40px;border-radius:8px;object-fit:cover;">':'<span style="width:64px;height:40px;border-radius:8px;background:'+(/^#|gradient/.test(bg||'')?bg:'linear-gradient(135deg,#ff8008,#ffc837)')+'"></span>');
+      return '<div style="display:flex;align-items:center;gap:9px;border:1px solid var(--bd);border-radius:12px;padding:7px 10px;margin-bottom:6px;background:#0f1626;">'+thumb+
+      '<div style="flex:1;min-width:0;"><b style="font-size:11.5px;">'+e34(b.title)+'</b><div style="font-size:9px;color:#8a94ab;font-weight:700;">'+e34(b.desc||'').slice(0,40)+'</div></div>'+
+      '<button class="bn b" style="padding:7px 10px;margin:0;" onclick="aBnEdit('+i+')">✏️</button>'+
+      '<button class="bn r" style="padding:7px 10px;margin:0;" onclick="aBnDel('+i+')">🗑️</button></div>';
+    }).join('');
+  }
+  window.aBnClear=function(){ ['aBnT','aBnD','aBnB'].forEach(function(id){ var el=document.getElementById(id); if(el) el.value=''; }); window.__aBnIdx=null; aFillBnr(); };
+  window.aBnEdit=function(i){
+    var b=mBanners[i]; if(!b) return;
+    window.__aBnIdx=i;
+    var t=document.getElementById('aBnT'),d=document.getElementById('aBnD'),bg=document.getElementById('aBnB');
+    if(t) t.value=b.title||''; if(d) d.value=b.desc||''; if(bg) bg.value=b.bg||'';
+    toast('✏️ Banner edit mode — बदलकर Save दबाएँ');
+  };
+  window.aBnSave=function(){
+    var t=(document.getElementById('aBnT')||{value:''}).value.trim();
+    if(!t) return toast('❌ Title लिखें');
+    var d=(document.getElementById('aBnD')||{value:''}).value.trim();
+    var bg=(document.getElementById('aBnB')||{value:''}).value.trim();
+    var b={title:t,desc:d,bg:bg};
+    if(typeof window.__aBnIdx==='number'&&mBanners[window.__aBnIdx]) mBanners[window.__aBnIdx]=b; else mBanners.push(b);
+    window.__aBnIdx=null;
+    ldr();
+    FS.collection('app_config').doc('main').set({bannersData:JSON.stringify(mBanners),updatedAt:Date.now(),by:ADMIN_EMAIL||''},{merge:true})
+      .then(function(){ ldrX(); toast('✅ Banner save — customer app live!'); aBnClear(); aFillBnr(); })
+      .catch(function(e){ ldrX(); toast('❌ '+e.message); });
+  };
+  window.aBnDel=function(i){
+    aAsk('🗑️','Banner "'+((mBanners[i]||{}).title||'')+'" delete करें?',function(ok){
+      if(!ok) return;
+      mBanners.splice(i,1);
+      FS.collection('app_config').doc('main').set({bannersData:JSON.stringify(mBanners),updatedAt:Date.now(),by:ADMIN_EMAIL||''},{merge:true})
+        .then(function(){ toast('🗑️ Banner delete'); aFillBnr(); }).catch(function(e){ toast('❌ '+e.message); });
+    });
+  };
+  /* sunder confirm (no native box) */
+  function aAsk(msg,cb){
+    try{
+      var ov=document.createElement('div');
+      ov.style.cssText='position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(5,9,20,.72);backdrop-filter:blur(4px);padding:20px;';
+      ov.innerHTML='<div style="width:100%;max-width:360px;background:#101a2e;border:1px solid #26324d;border-radius:20px;overflow:hidden;">'+
+        '<div style="background:linear-gradient(135deg,#3a1c0a,#6b3a00);padding:18px;text-align:center;font-size:36px;">⚠️</div>'+
+        '<div style="padding:14px 16px 18px;"><div style="font-size:13px;color:#e6e9f2;line-height:1.7;font-weight:600;">'+msg+'</div>'+
+        '<div style="display:flex;gap:8px;margin-top:14px;"><button style="flex:1;background:#222b40;color:#aab6cf;border:none;border-radius:12px;padding:12px;font-weight:900;cursor:pointer;" id="aAskNo">नहीं</button>'+
+        '<button style="flex:1;background:linear-gradient(135deg,#e53935,#ff6b5a);color:#fff;border:none;border-radius:12px;padding:12px;font-weight:900;cursor:pointer;" id="aAskYes">✅ हाँ</button></div></div></div>';
+      document.body.appendChild(ov);
+      ov.querySelector('#aAskNo').onclick=function(){ ov.remove(); cb(false); };
+      ov.querySelector('#aAskYes').onclick=function(){ ov.remove(); cb(true); };
+    }catch(e){ cb(true); }
+  }
+
+  /* ═══ 5) SERVICE RATINGS शो (list enhancer already above) + CATEGORY editor buttons for v3.3 list */
+  /* ═══ 6) MONEY — customer SW payouts (users subcollection withdrawals) ═══ */
+  try{
+    var _gS=gSet;
+    window.gSet=function(btn,coll,ph,id,st){
+      var scope='partners';
+      try{
+        if(coll==='withdrawals'){ WDS.forEach(function(w){ if(w._id===id){ scope=(w._ref&&String(w._ref.parent.parent.path).split('/')[0])||'partners'; } }); }
+      }catch(e){}
+      ldr();
+      (coll==='withdrawals'
+        ? SWSec.call('approveWithdrawal',{phone:ph,id:id,approve:(st==='Paid'||st==='Approved'),utr:''})
+        : SWSec.call('actionCashDeposit',{phone:ph,id:id,approve:(st==='Verified')}))
+        .then(function(){ ldrX(); toast('✅ '+st); try{ loadGroups(); }catch(e2){} })
+        .catch(function(e){ ldrX(); toast('❌ '+e.message); });
+    };
+  }catch(e){}
+  try{
+    var _dm=drawMoney;
+    window.drawMoney=function(){
+      var back=[], cust=[];
+      WDS.forEach(function(w){
+        var sc='partners'; try{ sc=(w._ref&&String(w._ref.parent.parent.path).split('/')[0])||'partners'; }catch(e){}
+        if(sc==='users') cust.push(w); else back.push(w);
+      });
+      var orig=WDS.slice(); WDS.length=0; Array.prototype.push.apply(WDS,back);
+      try{ _dm(); }catch(e){}
+      WDS.length=0; Array.prototype.push.apply(WDS,orig);
+      try{
+        var host=document.getElementById('mX'); if(!host) return;
+        var h='<div class="tt">👤 Customer SW Cash-Out (wallet)</div>'+
+          (cust.length?cust.map(function(w){
+            var cl=w.status==='Paid'?'#2bc96e':'#ffb74d';
+            return '<div class="cd"><div class="rw"><b style="font-size:12px;">'+inr(w.amt)+' → '+e34(w.upi||'')+'</b><span class="ch" style="background:'+cl+'22;color:'+cl+';">'+e34(w.status||'')+'</span></div>'+
+            '<div class="mut" style="margin-top:4px;">👤 Customer ('+e34(w._ph)+') • '+e34(w.at||'')+'</div>'+
+            (w.status!=='Paid'?'<div style="display:flex;gap:8px;margin-top:8px;"><a class="bn b" style="flex:1;text-align:center;text-decoration:none;" href="upi://pay?pa='+encodeURIComponent(w.upi||'')+'&pn=SewaAstra&am='+(w.amt||0)+'&cu=INR">📲 UPI से भेजें</a>'+
+            '<button class="bn g" style="flex:1;" onclick="gSet(this,\'withdrawals\',\''+e34(w._ph)+'\',\''+w._id+'\',\'Paid\')">✅ PAID mark</button></div>':'')+'</div>';
+          }).join(''):'<div class="em">कोई request नहीं</div>');
+        host.insertAdjacentHTML('beforeend',h);
+      }catch(e){}
+    };
+  }catch(e){}
+
+  /* ═══ BOOT ═══ */
+  (function tryA34(){
+    try{
+      if(!firebase.auth().currentUser) return setTimeout(tryA34,800);
+      if((firebase.auth().currentUser.email||'').toLowerCase()!==ADMIN_EMAIL) return;
+      aSubMain(); aSubRates(); setTimeout(aLoadMain,600);
+      aEnhance();
+    }catch(e){ setTimeout(tryA34,1000); }
+  })();
+  console.log('%c 🗂️🖼️ ADMIN v3.4 — ONE-TAB + GALLERY + BANNERS + RATINGS + PAYOUTS ✅ ','background:#b07800;color:#fff;font-weight:bold;padding:3px;');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 9 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([9, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 10 ═══ */
+try {
+/* ═══════════════ ADMIN v3.5 — SCALE ENGINE (लाखों orders/partners पर भी smooth admin) ═══════════════ */
+(function(){
+  if(window.__a35) return; window.__a35=1;
+  function e35(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+  var ACT=['Order Placed','Accepted','On the Way','Working'];
+
+  function mapD(s){ var m={}; s.docs.forEach(function(d){ var o=d.data(); o._id=d.id; m[d.id]=o; }); return m; }
+
+  /* ═══ 1) BOUNDED boot — LIVE active + हाल के (पूरी collection कभी नहीं) ═══ */
+  window.boot=function(){
+    if(window.__a35B) return; window.__a35B=1;
+    function ordErr(e){ toast('❌ orders: '+e.message); }
+    function drawAll(){ try{ drawDash(); }catch(e){} try{ drawOrders(); }catch(e){} try{ badges(); }catch(e){} }
+    /* Orders: LIVE + recent 250 */
+    var LIV={}, REC={};
+    function ordMerge(){
+      ORD=[]; for(var k in LIV) ORD.push(LIV[k]);
+      for(var k2 in REC){ if(!LIV[k2]) ORD.push(REC[k2]); }
+      ORD.sort(function(a,b){ return (b.createdAt||0)-(a.createdAt||0); });
+      drawAll();
+    }
+    try{ FS.collection('orders').where('status','in',ACT).onSnapshot(function(s){ LIV=mapD(s); ordMerge(); },ordErr); }catch(e){}
+    try{ FS.collection('orders').orderBy('createdAt','desc').limit(250).onSnapshot(function(s){ REC=mapD(s); ordMerge(); },ordErr); }catch(e){}
+
+    /* Partners: online LIVE + KYC-submitted queue + recent 250 — union bounded */
+    var PON={}, PSUB={}, PREC={};
+    function ptrMerge(){
+      PTR=[]; var seen={};
+      [PON,PSUB,PREC].forEach(function(mp){ for(var k in mp){ if(!seen[k]){ seen[k]=1; PTR.push(mp[k]); } } });
+      PTR.sort(function(a,b){ return (b.lastSeen||b.lastLogin||b.ts||0)-(a.lastSeen||a.lastLogin||a.ts||0); });
+      try{ drawDash(); }catch(e){} try{ drawPartners(); }catch(e){} try{ drawKyc(); }catch(e){} try{ badges(); }catch(e){}
+    }
+    try{ FS.collection('partners').where('online','==',true).limit(500).onSnapshot(function(s){ PON=mapD(s); ptrMerge(); },function(){}); }catch(e){}
+    try{ FS.collection('partners').where('kycStatus','==','Submitted').limit(500).onSnapshot(function(s){ PSUB=mapD(s); ptrMerge(); },function(){}); }catch(e){}
+    try{ FS.collection('partners').orderBy('lastSeen','desc').limit(250).onSnapshot(function(s){ PREC=mapD(s); ptrMerge(); },function(){}); }catch(e){}
+
+    /* Tickets: LIVE active + recent 120 */
+    var TOP={}, TREC={};
+    function tikMerge(){
+      TIK=[]; var seen={};
+      [TOP,TREC].forEach(function(mp){ for(var k in mp){ if(!seen[k]){ seen[k]=1; TIK.push(mp[k]); } } });
+      TIK.sort(function(a,b){ return (b.ts||0)-(a.ts||0); });
+      try{ drawTix(); }catch(e){} try{ badges(); }catch(e){}
+    }
+    try{ FS.collection('tickets').where('status','in',['Open','In Progress']).limit(300).onSnapshot(function(s){ TOP=mapD(s); tikMerge(); },function(){}); }catch(e){}
+    try{ FS.collection('tickets').orderBy('ts','desc').limit(120).onSnapshot(function(s){ TREC=mapD(s); tikMerge(); },function(){}); }catch(e){}
+
+    /* USR — bulk users अब load नहीं (search से) */
+    USR={};
+
+    /* Money — bounded loader (open + recent) */
+    a35Money();
+
+    /* scale info bar (एक बार) */
+    try{
+      if(!document.getElementById('a35Bar')){
+        var bar=document.createElement('div'); bar.id='a35Bar';
+        bar.style.cssText='margin:8px 12px;padding:8px 12px;border-radius:11px;background:rgba(15,163,87,.12);border:1px solid rgba(43,201,110,.35);color:#2bc96e;font-size:10.5px;font-weight:800;line-height:1.6;display:flex;justify-content:space-between;align-items:center;gap:8px;';
+        bar.innerHTML='⚡ <b>Scale mode ON</b> — app LIVE + हाल के data से चल रहा है (पूरी collection डाउनलोड नहीं), इसलिए लाखों users/partners/orders पर भी smooth।'+
+          '<span style="cursor:pointer;color:#8a94ab;" onclick="this.parentElement.remove()">✕</span>';
+        var host=document.querySelector('.wrap .nv')||document.querySelector('.nv');
+        if(host&&host.parentNode) host.parentNode.insertBefore(bar, host.nextSibling);
+      }
+    }catch(e){}
+    try{ toast('👑 Admin (Scale) तैयार — LIVE + हाल के data'); }catch(e){}
+  };
+
+  /* ═══ 2) BOUNDED money loader (base का loadGroups बदलो) ═══ */
+  function a35Fetch(col,statusIn,limitRec,arrName){
+    /* open items + recent, merge dedupe */
+    var out={};
+    function addS(sn){ sn.docs.forEach(function(d){ var x=d.data(); x._id=d.id; x._ref=d.ref; x._ph=d.ref.parent.parent.id; out[x._ref.path]=x; }); }
+    var jobs=[];
+    if(statusIn) jobs.push(FS.collectionGroup(col).where('status','in',statusIn).get());
+    if(limitRec) jobs.push(FS.collectionGroup(col).orderBy('ts','desc').limit(limitRec).get());
+    return Promise.all(jobs).then(function(rs){
+      rs.forEach(addS);
+      var arr=[]; for(var k in out) arr.push(out[k]);
+      arr.sort(function(a,b){ return (b.ts||0)-(a.ts||0); });
+      window[arrName]=arr;
+      return arr;
+    }).catch(function(e){ toast('⚠️ '+col+': '+e.message); return []; });
+  }
+  window.a35Money=function(){
+    return Promise.all([
+      a35Fetch('withdrawals',['Requested'],90,'WDS'),
+      a35Fetch('deposits',['Pending'],60,'DEPS'),
+      a35Fetch('incentives',null,90,'INCS'),
+      a35Fetch('gifts',['Requested','Booked'],60,'GIFTS')
+    ]).then(function(){
+      try{ drawMoney(); }catch(e){}
+      try{ drawTix(); }catch(e){}
+      try{ badges(); }catch(e){}
+    });
+  };
+  window.loadGroups=function(){ return window.a35Money(); };
+
+  /* gSet(PAID/APPROVE) के बाद loadGroups bound ही है — कोई और change नहीं */
+  console.log('%c ⚡ ADMIN v3.5 — SCALE ENGINE (bounded live admin) ✅ ','background:#0a6d3f;color:#fff;font-weight:bold;padding:3px;');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 10 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([10, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 11 ═══ */
+try {
+/* ═══════════════ ADMIN v3.6 — 🆘 SOS RED-ALERT POPUP + SOUND (user info सहित) ═══════════════ */
+(function(){
+  if(window.__a36) return; window.__a36=1;
+  function e36(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+
+  var _q=[], _cur=null, _alarm=null;
+
+  /* overlay */
+  function ovr(){
+    var o=document.getElementById('a36Ov');
+    if(!o){
+      o=document.createElement('div'); o.id='a36Ov';
+      o.style.cssText='position:fixed;inset:0;z-index:9999995;display:none;align-items:center;justify-content:center;padding:16px;background:rgba(40,2,2,.78);backdrop-filter:blur(5px);';
+      document.body.appendChild(o);
+      var st=document.createElement('style');
+      st.textContent=
+        '#a36Ov *{box-sizing:border-box}'+
+        '.a36card{width:100%;max-width:430px;border-radius:24px;overflow:hidden;box-shadow:0 0 0 4px rgba(255,60,60,.4),0 34px 110px rgba(0,0,0,.7);animation:a36in .25s}'+
+        '@keyframes a36in{from{transform:scale(.9);opacity:0}to{transform:none;opacity:1}}'+
+        '.a36head{background:linear-gradient(135deg,#7f0000,#ff1744);color:#fff;padding:16px;display:flex;justify-content:space-between;align-items:center;animation:a36flash 1s infinite}'+
+        '@keyframes a36flash{50%{filter:brightness(1.35)}}'+
+        '.a36body{background:#160b0b;color:#ffe;padding:14px 16px}'+
+        '.a36info{background:#2a0d0d;border:1px solid #7f2020;border-radius:12px;padding:10px 12px;font-size:12px;line-height:1.9;font-weight:700}'+
+        '.a36btns{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}'+
+        '.a36btns a,.a36btns button{border:none;border-radius:12px;padding:11px;font-weight:900;font-size:11.5px;cursor:pointer;text-decoration:none;text-align:center}'+
+        '.a36ok{flex:2;background:linear-gradient(135deg,#0f7a37,#2bc96e);color:#fff}'+
+        '.a36call{flex:1;background:linear-gradient(135deg,#0d47a1,#1e88e5);color:#fff}'+
+        '.a36wa{flex:1;background:#25d366;color:#063'+
+        ''+
+        ''+
+        ''+
+        '';
+      document.head.appendChild(st);
+    }
+    return o;
+  }
+  function show(){
+    var o=ovr();
+    if(!_cur){ o.style.display='none'; return; }
+    var s=_cur;
+    var loc=s.loc&&s.loc.lat;
+    var mapL=loc?('https://www.google.com/maps?q='+s.loc.lat+','+s.loc.lon):'';
+    o.innerHTML='<div class="a36card">'+
+      '<div class="a36head"><div><div style="font-size:26px;">🚨 EMERGENCY SOS</div><div style="font-size:10.5px;font-weight:700;opacity:.92;">'+e36(s.at||new Date(s.ts||Date.now()).toLocaleString('en-IN'))+' • '+(_q.length>1?('+ '+( _q.length-1)+' और active'):'')+'</div></div><span style="font-size:24px;cursor:pointer;" onclick="a36X()">✕</span></div>'+
+      '<div class="a36body">'+
+        '<div class="a36info">👤 <b>'+e36(s.name||'Customer')+'</b>'+
+        '<br>📱 <b>+91 '+e36(s.phone||'—')+'</b>'+(s.uid?'<br>🔑 '+e36(s.uid):'')+
+        (s.orderId?'<br>🧾 Last order: <b>'+e36(s.orderId)+'</b>':'')+
+        (loc?'<br>📍 <a href="'+mapL+'" target="_blank" style="color:#7fb3ff;" rel="noopener noreferrer">lat '+s.loc.lat.toFixed(5)+', lon '+s.loc.lon.toFixed(5)+' — MAP खोलें</a>':'<br>📍 GPS off (location नहीं)')+
+        '</div>'+
+        '<div style="margin-top:10px;background:#3a1414;border-radius:12px;padding:10px 12px;font-size:13px;line-height:1.7;font-weight:800;color:#ffd9d9;">🗣️ "'+e36(s.msg||'—')+'"</div>'+
+        '<div class="a36btns">'+
+          '<a class="a36call" href="tel:+91'+e36(s.phone||'')+'">📞 Call</a>'+
+          '<a class="a36wa" href="https://wa.me/91'+e36(s.phone||'')+'" target="_blank" rel="noopener noreferrer">💬 WhatsApp</a>'+
+          (loc?'<a class="a36wa" style="background:#6a1b9a;color:#fff;flex:1;" href="'+mapL+'" target="_blank" rel="noopener noreferrer">🗺️ Map</a>':'')+
+          '<button class="a36ok" onclick="a36Done()">✅ समझ गया — Handle किया</button>'+
+        '</div>'+
+      '</div></div>';
+    o.style.display='flex';
+    siren();
+  }
+  window.a36X=function(){
+    try{ sirenStop(); }catch(e){}
+    ovr().style.display='none';
+  };
+  window.a36Done=function(){
+    var s=_cur; if(!s){ a36X(); return; }
+    try{
+      FS.collection('sos_alerts').doc(s._id).update({status:'handled',handledAt:Date.now(),handledBy:ADMIN_EMAIL||''}).then(function(){ toast('✅ SOS handled'); }).catch(function(e){ toast('❌ '+e.message); });
+    }catch(e){}
+    _q=_q.filter(function(x){ return x._id!==(s._id); });
+    _cur=_q.length?_q[0]:null;
+    show();
+    if(!_cur) a36X();
+  };
+
+  /* 🔊 SIREN */
+  function siren(){
+    try{ if(_alarm) return; _alarm=setInterval(function(){
+      try{
+        if(!document.getElementById('a36Ov')||document.getElementById('a36Ov').style.display!=='flex'){ sirenStop(); return; }
+        var C=new (window.AudioContext||window.webkitAudioContext)();
+        var now=C.currentTime;
+        function tone(f,d){ var o=C.createOscillator(),g=C.createGain(); o.connect(g); g.connect(C.destination); o.type='square'; o.frequency.value=f; g.gain.setValueAtTime(0.01,now); g.gain.exponentialRampToValueAtTime(0.35,now+0.04); g.gain.exponentialRampToValueAtTime(0.01,now+d); o.start(now); o.stop(now+d+0.05); }
+        tone(880,0.28); setTimeout(function(){ try{ tone(560,0.28); }catch(e){} },320);
+      }catch(e){}
+    },1000); }catch(e){}
+  }
+  function sirenStop(){ try{ if(_alarm){ clearInterval(_alarm); _alarm=null; } }catch(e){} }
+  /* autoplay unlock: पहली click पर audio context resume */
+  document.addEventListener('click',function(){ try{ if(window.AudioContext||window.webkitAudioContext){ var C=new (window.AudioContext||window.webkitAudioContext)(); if(C.state==='suspended') C.resume().catch(function(){}); } }catch(e){} },{once:true});
+
+  /* listener */
+  try{
+    FS.collection('sos_alerts').where('status','==','active').onSnapshot(function(snap){
+      snap.docChanges().forEach(function(ch){
+        if(ch.type!=='added') return;
+        var d=ch.doc, x=d.data(); x._id=d.id;
+        _q.push(x);
+        if(!_cur) _cur=x;
+        else _q.sort(function(a,b){ return (b.ts||0)-(a.ts||0); }); _cur=_q[0];
+        show();
+        try{ toast('🚨 EMERGENCY SOS — '+x.phone); }catch(e){}
+      });
+    },function(){});
+  }catch(e){}
+  console.log('%c 🚨 ADMIN v3.6 — SOS RED ALERT + SOUND ✅ ','background:#d50000;color:#fff;font-weight:bold;padding:3px;');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 11 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([11, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 12 ═══ */
+try {
+/* ═══════════════ ADMIN v3.7 — 💰 PLATFORM COMMISSION (Admin edit → Partner KYC पर live) ═══════════════ */
+(function(){
+  if(window.__a37) return; window.__a37=1;
+  var cVal=10;
+
+  function card(){
+    var host=document.getElementById('secD'); if(!host) return;
+    if(document.getElementById('aCmX')){ fill(); return; }
+    host.insertAdjacentHTML('beforeend',
+      '<div class="cd" id="aCmX" style="border-color:#1d3a5f;margin-top:8px;">'+
+        '<div class="rw"><b style="font-size:12.5px;">💰 SewaAstra Commission (Platform) %</b><span class="gold">PARTNER SETTING</span></div>'+
+        '<div style="font-size:10.5px;color:#aab6cf;font-weight:700;margin-top:4px;">Partner KYC में यही % commission दिखता है (checkbox accept) — यहाँ बदलो, Save दबाओ, सबको live लागू।</div>'+
+        '<div style="display:flex;gap:8px;align-items:center;margin-top:8px;">'+
+          '<input id="aCmIn" type="number" min="0" max="60" style="width:110px;text-align:center;font-weight:900;" placeholder="Commission %">'+
+          '<button class="bn o" onclick="aCmSave()">💾 Save</button>'+
+          '<span id="aCmNow" style="font-size:10px;color:#8a94ab;font-weight:800;"></span>'+
+        '</div>'+
+        '<div style="margin-top:7px;">'+[0,5,10,15,20,25].map(function(v){
+          return '<span style="display:inline-block;margin:2px;font-size:10px;font-weight:800;border-radius:16px;padding:4px 11px;background:#0f1626;border:1px solid var(--bd);color:#c6cbdb;cursor:pointer;" onclick="aCmSet('+v+')">'+v+'%</span>';
+        }).join('')+'</div>'+
+      '</div>');
+    try{ drawDash(); }catch(e){}
+  }
+  function fill(){
+    var e=document.getElementById('aCmIn'); if(e&&document.activeElement!==e) e.value=cVal;
+    var n=document.getElementById('aCmNow'); if(n) n.innerText='अभी: '+cVal+'%';
+  }
+  window.aCmSet=function(v){ cVal=Number(v)||0; fill(); };
+  window.aCmSave=function(){
+    var e=document.getElementById('aCmIn'); if(!e) return;
+    var v=Math.max(0,Math.min(60,parseInt(e.value||'0',10)||0));
+    ldr();
+    FS.collection('config').doc('global').set({commission:v,commissionAt:Date.now(),commissionBy:ADMIN_EMAIL||''},{merge:true})
+      .then(function(){ ldrX(); cVal=v; toast('✅ Commission '+v+'% save — Partner KYC पर live दिखेगा'); })
+      .catch(function(e2){ ldrX(); toast('❌ '+e2.message); });
+  };
+  try{ FS.collection('config').doc('global').onSnapshot(function(d){ cVal=(d.exists)?(Number(d.data().commission)||0):10; fill(); },function(){}); }catch(e){}
+  var _dd7=drawDash;
+  drawDash=function(){ _dd7(); card(); };
+  function boot7(){
+    try{
+      if(!firebase.auth().currentUser) return setTimeout(boot7,800);
+      if((firebase.auth().currentUser.email||'').toLowerCase()!==ADMIN_EMAIL) return;
+      card();
+    }catch(e){ setTimeout(boot7,1000); }
+  }
+  setTimeout(boot7,600);
+  console.log('%c 💰 ADMIN v3.7 — COMMISSION EDITOR ✅ ','background:#b07800;color:#fff;font-weight:bold;padding:3px;');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 12 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([12, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 13 ═══ */
+try {
+/* ═══════════════ ADMIN v3.8 — 🧾 ONBOARDING FEE + OFFER  •  🎬 PARTNER TRAINING VIDEO (Gallery) ═══════════════ */
+(function(){
+  if(window.__a38) return; window.__a38=1;
+  var O={fee:199,offType:'none',offVal:0,note:''};
+  var T={vdo:'',cap:''};
+  function fillO(){
+    var e;
+    e=document.getElementById('a38F'); if(e&&document.activeElement!==e) e.value=O.fee;
+    e=document.getElementById('a38T'); if(e&&document.activeElement!==e) e.value=O.offType;
+    e=document.getElementById('a38V'); if(e&&document.activeElement!==e) e.value=O.offVal;
+    e=document.getElementById('a38N'); if(e&&document.activeElement!==e) e.value=O.note;
+    var s=document.getElementById('a38Sum'); if(s){
+      var amt=O.fee, txt='₹'+O.fee;
+      if(O.offType==='free'){ amt=0; txt='₹'+O.fee+' → FREE 🎉'; }
+      else if(O.offType==='flat'){ amt=Math.max(0,O.fee-O.offVal); txt='₹'+O.fee+' → ₹'+amt; }
+      else if(O.offType==='percent'){ amt=Math.max(0,O.fee-Math.round(O.fee*O.offVal/100)); txt='₹'+O.fee+' → ₹'+amt; }
+      s.innerHTML='Partner को दिखेगा: <b style="color:#ffd60a;">'+txt+'</b>'+(O.note?' — '+esc38(O.note):'');
+    }
+  }
+  function esc38(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+  window.a38Save=function(){
+    var fee=Math.max(0,parseInt((document.getElementById('a38F')||{}).value||'0',10)||0);
+    var off=(document.getElementById('a38T')||{}).value||'none';
+    var val=Math.max(0,parseInt((document.getElementById('a38V')||{}).value||'0',10)||0);
+    var note=(document.getElementById('a38N')||{}).value||'';
+    ldr();
+    FS.collection('config').doc('global').set({obFee:fee,obOffType:off,obOffVal:val,obNote:note,obAt:Date.now(),obBy:ADMIN_EMAIL||''},{merge:true})
+      .then(function(){ ldrX(); O.fee=fee;O.offType=off;O.offVal=val;O.note=note; fillO(); toast('✅ Onboarding fee + offer save — Partner profile पर live'); })
+      .catch(function(e){ ldrX(); toast('❌ '+e.message); });
+  };
+  window.a38Pv=function(inp){
+    var f=inp.files&&inp.files[0]; if(!f) return;
+    if(!/video\//.test(f.type)) return toast('❌ Video file चुनें');
+    if(f.size>700*1024) return toast('⚠️ Video 700KB से छोटी होनी चाहिए (gallery से छोटा clip / 10-15 sec)। Firestore limit ~1MB।');
+    var rd=new FileReader();
+    rd.onload=function(ev){
+      T.vdo=String(ev.target.result||''); T.cap=(document.getElementById('a38C')||{}).value||'';
+      var pv=document.getElementById('a38P'); if(pv) pv.innerHTML='<video controls style="width:100%;max-height:150px;border-radius:10px;background:#000;" src="'+SWXSS.esc(SWXSS.safeUrl(T.vdo))+'"></video>';
+      var sz=document.getElementById('a38S'); if(sz) sz.innerText='✅ Loaded: '+Math.round(f.size/1024)+' KB — Save दबाएँ';
+    };
+    rd.readAsDataURL(f);
+  };
+  window.a38SaveTr=function(){
+    if(!T.vdo) return toast('❌ पहले gallery से video choose करें');
+    T.cap=(document.getElementById('a38C')||{}).value||'';
+    ldr('Training video save...');
+    FS.collection('config').doc('partnerTraining').set({vdo:T.vdo,caption:T.cap,at:Date.now(),by:ADMIN_EMAIL||''},{merge:true})
+      .then(function(){ ldrX(); toast('✅ Training video save — Partner app में ▶️ दिखेगी'); })
+      .catch(function(e){ ldrX(); toast('❌ '+e.message); });
+  };
+  window.a38DelTr=function(){
+    ldr();
+    FS.collection('config').doc('partnerTraining').set({vdo:''},{merge:true}).then(function(){
+      ldrX(); T.vdo=''; var pv=document.getElementById('a38P'); if(pv) pv.innerHTML='<div style="color:#8a94ab;font-size:11px;font-weight:700;">कोई video upload नहीं</div>';
+      var sz=document.getElementById('a38S'); if(sz) sz.innerText='';
+      toast('🗑️ Training video हटाई');
+    }).catch(function(e){ ldrX(); toast('❌ '+e.message); });
+  };
+  function cards(){
+    var host=document.getElementById('secD'); if(!host) return;
+    if(!document.getElementById('a38ObX')){
+      host.insertAdjacentHTML('beforeend',
+        '<div class="cd" id="a38ObX" style="border-color:#7a5a00;margin-top:8px;">'+
+          '<div class="rw"><b style="font-size:12.5px;">🧾 Partner Onboarding / Activation Fee</b><span class="gold">PARTNER SETTING</span></div>'+
+          '<div style="font-size:10.5px;color:#aab6cf;font-weight:700;margin-top:4px;">नए partner को काम शुरू करने से पहले यह fee दिखेगी। आप offer/छूट या FREE भी लगा सकते हैं।</div>'+
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:9px;">'+
+            '<input id="a38F" type="number" min="0" style="width:96px;text-align:center;font-weight:900;" placeholder="₹ Fee">'+
+            '<select id="a38T" style="flex:1;min-width:120px;font-weight:800;"><option value="none">कोई offer नहीं</option><option value="free">FREE (पूरी माफ़)</option><option value="flat">₹ flat छूट</option><option value="percent">% छूट</option></select>'+
+            '<input id="a38V" type="number" min="0" style="width:80px;text-align:center;font-weight:800;" placeholder="Value">'+
+          '</div>'+
+          '<input id="a38N" placeholder="Offer note / caption (optional) — जैसे: इस महीने 50% off" style="width:100%;box-sizing:border-box;margin-top:7px;font-weight:700;" maxlength="90">'+
+          '<div id="a38Sum" style="margin:7px 0 4px;font-size:12px;font-weight:900;color:#ffd60a;"></div>'+
+          '<button class="bn o" style="width:100%;padding:11px;" onclick="a38Save()">💾 Save Onboarding Fee & Offer</button>'+
+        '</div>');
+    }
+    if(!document.getElementById('a38TrX')){
+      host.insertAdjacentHTML('beforeend',
+        '<div class="cd" id="a38TrX" style="border-color:#1d3a5f;margin-top:8px;">'+
+          '<div class="rw"><b style="font-size:12.5px;">🎬 Partner Training Video</b><span class="gold">PARTNER SETTING</span></div>'+
+          '<div style="font-size:10.5px;color:#aab6cf;font-weight:700;margin-top:4px;">अपनी gallery/device से सीधे video upload करें → Partner app के Profile में ▶️ Training दिखेगी। छोटी clip रखें (≤700KB, ~10-15 sec)।</div>'+
+          '<input type="file" id="a38Fv" accept="video/*" style="margin-top:9px;" onchange="a38Pv(this)">'+
+          '<div id="a38P" style="margin-top:8px;"><div style="color:#8a94ab;font-size:11px;font-weight:700;">कोई video upload नहीं</div></div>'+
+          '<div id="a38S" style="font-size:10px;color:#2bc96e;font-weight:800;margin-top:4px;"></div>'+
+          '<input id="a38C" placeholder="Video caption (optional)" style="width:100%;box-sizing:border-box;margin-top:8px;font-weight:700;" maxlength="90">'+
+          '<div style="display:flex;gap:8px;margin-top:8px;"><button class="bn o" style="flex:1.4;padding:11px;" onclick="a38SaveTr()">💾 Save Video</button><button class="bn r" style="flex:1;padding:11px;" onclick="a38DelTr()">🗑️ हटाएँ</button></div>'+
+        '</div>');
+    }
+    fillO();
+    /* fill existing video (pehli baar) */
+    if(!window.__a38VdFilled){
+      try{ FS.collection('config').doc('partnerTraining').get().then(function(d){
+        window.__a38VdFilled=1;
+        if(!d.exists) return;
+        var v=String(d.data().vdo||'');
+        var pv=document.getElementById('a38P'); if(!pv) return;
+        if(v){ T.vdo=v; pv.innerHTML='<video controls style="width:100%;max-height:150px;border-radius:10px;background:#000;" src="'+SWXSS.esc(SWXSS.safeUrl(v))+'"></video>'; var c=document.getElementById('a38C'); if(c&&!c.value) c.value=String(d.data().caption||''); }
+        else pv.innerHTML='<div style="color:#8a94ab;font-size:11px;font-weight:700;">कोई video upload नहीं</div>';
+      }).catch(function(){}); }catch(e){}
+    }
+    var _dd=drawDash; /* no-op guard */
+  }
+  try{ FS.collection('config').doc('global').onSnapshot(function(d){ if(d.exists){ var x=d.data(); O.fee=Number(x.obFee)||0; O.offType=x.obOffType||'none'; O.offVal=Number(x.obOffVal)||0; O.note=String(x.obNote||''); } fillO(); },function(){}); }catch(e){}
+  var _d9=drawDash;
+  drawDash=function(){ try{ _d9(); }catch(e){} setTimeout(function(){ try{ cards(); }catch(e){} },10); };
+  function boot9(){
+    try{
+      if(!firebase.auth().currentUser) return setTimeout(boot9,700);
+      if((firebase.auth().currentUser.email||'').toLowerCase()!==ADMIN_EMAIL) return;
+      cards();
+    }catch(e){ setTimeout(boot9,1000); }
+  }
+  setTimeout(boot9,700);
+  console.log('%c 🧾🎬 ADMIN v3.8 — ONBOARDING FEE/OFFER + TRAINING VIDEO ✅ ','background:#0f5c2e;color:#fff;font-weight:bold;padding:3px;');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 13 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([13, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 14 ═══ */
+try {
+/* ═══════════════ ADMIN v3.9 — 🎬 TRAINING VIDEO: LINK भी update करें + preview ═══════════════ */
+(function(){
+  if(window.__a39) return; window.__a39=1;
+  function esc39(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+  function ui(){
+    try{
+      var card=document.getElementById('a38TrX'); if(!card||document.getElementById('a39LinkRow')) return;
+      var sep=document.createElement('div'); sep.id='a39LinkRow'; sep.style.cssText='border-top:1px dashed var(--bd,#26324d);margin-top:10px;padding-top:10px;';
+      sep.innerHTML=
+        '<div style="font-size:10.5px;color:#aab6cf;font-weight:800;">🔗 या फिर video का <b>direct link (URL)</b> डालें — बड़ी video बिना upload के चलाएँ (YouTube/GDrive/site).</div>'+
+        '<input id="a39L" placeholder="https://.../video.mp4 (direct .mp4/.webm/.ogv link)" style="width:100%;box-sizing:border-box;margin-top:8px;font-weight:700;" value="">'+
+        '<div style="display:flex;gap:8px;margin-top:8px;">'+
+          '<button class="bn o" style="flex:1.4;padding:11px;" onclick="a39SaveLink()">💾 Save Link</button>'+
+          '<button class="bn b" style="flex:1;padding:11px;" onclick="a39Test()">▶️ Test करें</button>'+
+          '<button class="bn r" style="flex:1;padding:11px;" onclick="a39DelLink()">🗑️ Link हटाएँ</button></div>'+
+        '<div id="a39Msg" style="font-size:10px;color:#8a94ab;font-weight:800;margin-top:6px;">जब दोनों हों (upload + link) — Partner app में link प्राथमिकता से चलेगा।</div>';
+      card.appendChild(sep);
+      /* load existing */
+      FS.collection('config').doc('partnerTraining').get().then(function(d){
+        if(!d.exists) return;
+        var url=String(d.data().url||'').trim();
+        var i=document.getElementById('a39L'); if(i&&url) i.value=url;
+        if(url){ var m=document.getElementById('a39Msg'); if(m) m.innerHTML='✅ Current link set है — Partner इसी से चलेगा'; }
+      }).catch(function(){});
+    }catch(e){}
+  }
+  window.a39SaveLink=function(){
+    var i=document.getElementById('a39L'); if(!i) return;
+    var url=String(i.value||'').trim();
+    if(!url) return toast('❌ पहले video का link डालें');
+    var cap=((document.getElementById('a38C')||{}).value||'');
+    ldr();
+    FS.collection('config').doc('partnerTraining').set({url:url,caption:cap,urlAt:Date.now(),by:ADMIN_EMAIL||''},{merge:true})
+      .then(function(){ ldrX(); var m=document.getElementById('a39Msg'); if(m) m.innerHTML='✅ Link save — Partner ▶️ Training में चलेगा'; toast('✅ Training link save'); })
+      .catch(function(e){ ldrX(); toast('❌ '+e.message); });
+  };
+  window.a39Test=function(){
+    var i=document.getElementById('a39L'); var url=i?String(i.value||'').trim():'';
+    if(!url) return toast('पहले link डालें');
+    try{ window.open(url, '_blank', 'noopener,noreferrer'); }catch(e){ toast('❌ Link नहीं खुला'); }
+  };
+  window.a39DelLink=function(){
+    ldr();
+    FS.collection('config').doc('partnerTraining').set({url:''},{merge:true}).then(function(){
+      ldrX(); var i=document.getElementById('a39L'); if(i) i.value='';
+      var m=document.getElementById('a39Msg'); if(m) m.innerHTML='🗑️ Link हटा दिया (upload video हो तो वही चलेगी)';
+      toast('🗑️ Training link हटा दिया');
+    }).catch(function(e){ ldrX(); toast('❌ '+e.message); });
+  };
+  var _dd=drawDash;
+  drawDash=function(){ try{ _dd(); }catch(e){} setTimeout(function(){ try{ ui(); }catch(e){} },50); };
+  function boot(){
+    try{
+      if(!firebase.auth().currentUser) return setTimeout(boot,700);
+      if((firebase.auth().currentUser.email||'').toLowerCase()!==ADMIN_EMAIL) return;
+      setTimeout(ui,300);
+    }catch(e){ setTimeout(boot,1000); }
+  }
+  setTimeout(boot,900);
+  console.log('%c 🔗 ADMIN v3.9 — TRAINING LINK EDITOR ✅ ','background:#0d6efd;color:#fff;font-weight:bold;padding:3px;');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 14 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([14, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 15 ═══ */
+try {
+/* ═══════════════════════════════════════════════════════════════
+   SEWAASTRA — SUNDER POPUP SYSTEM v8.3
+   Har alert/confirm/prompt = beautiful in-app popup (kabhi native
+   browser/GitHub jaisa popup nahi). window.alert/confirm/prompt sab
+   yahin route hote hain.
+   ═══════════════════════════════════════════════════════════════ */
+(function(){
+  if(window.__sunderUi) return; window.__sunderUi=1;
+  var Z=2147483000, ov=null, box=null, cur=null;
+
+  function el(id){ return document.getElementById(id); }
+  function esc(s){ s=String(s==null?'':s); return s.replace(/[&<>"']/g,function(m){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m];}); }
+  function nl(s){ return esc(s).replace(/\\n/g,'<br>'); }
+
+  function cssOnce(){
+    if(document.getElementById('swSunderCss')) return;
+    var st=document.createElement('style'); st.id='swSunderCss';
+    st.textContent=
+      '#swSOv{position:fixed;inset:0;z-index:'+Z+';display:none;align-items:center;justify-content:center;padding:18px;background:rgba(7,10,28,.62);backdrop-filter:blur(6px);}'+
+      '#swSOv.on{display:flex;}'+
+      '#swSBox{width:min(92vw,356px);max-height:86vh;overflow:hidden;border-radius:26px;background:#fff;color:#1b2540;box-shadow:0 30px 90px rgba(2,5,20,.6);display:flex;flex-direction:column;animation:swSIn .28s cubic-bezier(.2,1.15,.4,1);border:1px solid rgba(255,255,255,.18);}'+
+      '@keyframes swSIn{from{transform:translateY(26px) scale(.95);opacity:0}to{transform:none;opacity:1}}'+
+      '#swSH{background:linear-gradient(135deg,#0b1220,#26364f 55%,#ff6b00);color:#fff;padding:20px 18px 26px;text-align:center;position:relative;}'+
+      '#swSH .swI{width:66px;height:66px;border-radius:50%;margin:0 auto 10px;display:flex;align-items:center;justify-content:center;font-size:30px;background:linear-gradient(135deg,#ff6b00,#ff2d95 55%,#7a2bff);box-shadow:0 8px 26px rgba(255,45,149,.45);}'+
+      '#swSH .swT{font-size:17px;font-weight:900;}'+
+      '#swSH .swS{font-size:12px;opacity:.85;line-height:1.6;margin-top:6px;word-break:break-word;}'+
+      '#swSB{padding:16px 16px 18px;overflow-y:auto;}'+
+      '#swSB .swRow{display:flex;gap:9px;margin-top:2px;}'+
+      '#swSB .swB{flex:1;border:none;border-radius:14px;padding:13px 8px;font-weight:900;font-size:13px;cursor:pointer;color:#fff;}'+
+      '#swSB .swIn{width:100%;box-sizing:border-box;border:2px solid #e2e8f4;border-radius:13px;padding:12px;font-size:14px;font-weight:800;outline:none;margin-top:8px;background:#f6f9ff;color:#1b2540;}'+
+      '#swSB .swIn:focus{border-color:#ff6b00;background:#fff;}'+
+      'body.dark-mode #swSBox, body.dark #swSBox{background:#131a2e;color:#eef2fb;}'+
+      'body.dark-mode #swSB .swIn, body.dark #swSB .swIn{background:#0e1526;border-color:#2a3857;color:#eef2fb;}';
+    document.head.appendChild(st);
+  }
+  function ensure(){
+    cssOnce();
+    if(ov) return;
+    ov=document.createElement('div'); ov.id='swSOv';
+    ov.innerHTML='<div id="swSBox"><div id="swSH"><div class="swI" id="swSI">💬</div><div class="swT" id="swST"></div><div class="swS" id="swSS"></div></div><div id="swSB"></div></div>';
+    document.body.appendChild(ov);
+    box=el('swSBox');
+    ov.addEventListener('click',function(e){ if(e.target===ov && cur && cur.tap) close(); });
+  }
+  function open(o){
+    ensure();
+    cur=o;
+    ov.classList.add('on');
+    el('swSI').textContent=o.icon||'💬';
+    el('swST').textContent=o.title||'SewaAstra';
+    el('swSS').innerHTML=o.html||nl(o.msg||'');
+    var b=el('swSB');
+    b.innerHTML='';
+    if(o.input){
+      var inp=document.createElement('input');
+      inp.type=(o.inputType)||'text';
+      inp.className='swIn';
+      inp.placeholder=o.ph||'';
+      inp.value=(o.def==null?'':o.def);
+      b.appendChild(inp);
+      setTimeout(function(){ try{ inp.focus(); }catch(e){} },120);
+    }
+    var row=document.createElement('div'); row.className='swRow';
+    function mk(txt,bg,cls,fn){
+      var x=document.createElement('button'); x.className='swB '+cls;
+      x.style.background=bg; x.innerHTML=txt;
+      x.onclick=function(){ close(); if(fn) fn(); };
+      return x;
+    }
+    if(o.input){
+      row.appendChild(mk(o.ok||'✅ ठीक है', o.danger?'linear-gradient(135deg,#e53935,#ff6659)':'linear-gradient(135deg,#15a04a,#1fc25e)','swOk',function(){ var v=inp.value; if(o.onOk) o.onOk(v); }));
+      row.appendChild(mk(o.cancel||'✕ रद्द','linear-gradient(135deg,#6b7686,#546078)','swNo',o.onCancel));
+    } else if(o.buttons==='no'){
+      row.appendChild(mk(o.ok||'✅ ठीक है','linear-gradient(135deg,#0d6efd,#7a5cff)','swOk',o.onOk));
+    } else {
+      row.appendChild(mk(o.cancel||'✕ '+(o.no||'रुकें'),'linear-gradient(135deg,#6b7686,#546078)','swNo',o.onCancel));
+      row.appendChild(mk(o.ok||'✅ '+(o.yes||'हाँ'), o.danger?'linear-gradient(135deg,#e53935,#ff6659)':'linear-gradient(135deg,#0d6efd,#7a5cff)','swOk',o.onOk));
+    }
+    b.appendChild(row);
+    return o;
+  }
+  function close(){ if(ov) ov.classList.remove('on'); }
+  window.swUi={
+    alert:function(o){ open(typeof o==='string'?{msg:o}:o); },
+    confirm:function(o){ o.buttons='yn'; return open(o); },
+    prompt:function(o){ o.input=true; o.tap=false; return open(o); },
+    close:close
+  };
+  console.log('%c 💎 SUNDER POPUPS v8.3 ','background:linear-gradient(90deg,#ff2d95,#7a2bff);color:#fff;font-weight:bold;padding:3px;');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 15 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([15, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 16 ═══ */
+try {
+/* Native overrides — admin me bhi har alert/confirm/prompt sunder */
+(function(){
+  window.alert=function(m){
+    try{ if(window.toast){ toast(String(m==null?'':m).replace(/\n/g,' ')); return; } }catch(e){}
+    try{ swUi.alert({msg:m}); }catch(e){}
+  };
+  window.confirm=function(){ return false; };
+  window.prompt=function(){ return null; };
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 16 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([16, String(e)]); } catch (_) {} }
+
+/* ═══ ब्लॉक 17 ═══ */
+try {
+/* ═══════════════════════════════════════════════════════════════
+   SEWAASTRA — EXIT GUARD v8.2 (teeno apps) — सुंदर confirm popup
+   • Back button / tab close / refresh / logout — bina confirm bahar nahi
+   • Custom gradient modal (koi native confirm/prompt nahi)
+   • In-app internal pages (Policy/About/Terms) kholne par confirm NAHI
+   • window.__exitGuard.silent() = internal reload/logout bypass
+   ═══════════════════════════════════════════════════════════════ */
+(function(){
+  if(window.__exitGuardInstalled) return; window.__exitGuardInstalled=1;
+  var armed=true, silentT=0, pendingExit=false, zz=2147483600;
+  var root=null, box=null, busy=null;
+  var PAL={
+    bg:'linear-gradient(160deg,#101c3f,#17284f 45%,#0b142e)',
+    card:'linear-gradient(165deg,#ffffff,#f2f5fd)',
+    ring:'linear-gradient(135deg,#ff6b00,#ff2d95,#7a2bff)',
+    good:'linear-gradient(135deg,#15a04a,#1fc25e)',
+    bad:'linear-gradient(135deg,#e53935,#ff6659)',
+    blu:'linear-gradient(135deg,#0d6efd,#7a5cff)'
+  };
+  function el(id){ return document.getElementById(id); }
+  function _m(){ return busy||null; }
+
+  function ensureUI(){
+    if(root) return;
+    root=document.createElement('div');
+    root.id='swExitRoot';
+    root.innerHTML=
+      '<div id="swExitBg" style="position:fixed;inset:0;background:rgba(8,10,26,.62);backdrop-filter:blur(6px);z-index:'+zz+';display:none;align-items:center;justify-content:center;padding:18px;"></div>'+
+      '<div id="swExitBox" style="position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:'+(zz+1)+';width:min(92vw,352px);display:none;text-align:center;font-family:system-ui,Arial,sans-serif;overflow:hidden;border-radius:26px;box-shadow:0 30px 90px rgba(3,6,20,.65);border:1px solid rgba(255,255,255,.25);"></div>';
+    document.body.appendChild(root);
+    var bg=el('swExitBg');
+    if(bg) bg.addEventListener('click',function(e){ if(e.target===bg){ dismiss(); } });
+  }
+  function render(cfg){
+    ensureUI();
+    var icon=(cfg&&cfg.icon)||'🚪';
+    var title=(cfg&&cfg.title)||'बाहर जाना है?';
+    var sub=(cfg&&cfg.sub)||'क्या आप सच में SewaAstra से बाहर जाना चाहते हैं?<br><b>रुकें</b> दबाएँ तो आप यहीं बने रहेंगे।';
+    var yes=(cfg&&cfg.yes)||'हाँ, बाहर जाएँ';
+    var no=(cfg&&cfg.no)||'रुकें';
+    var yesBg=(cfg&&cfg.yesBg)||PAL.bad;
+    var sub2=(cfg&&cfg.sub2)||'';
+    var html=
+      '<div style="background:'+PAL.bg+';color:#fff;padding:26px 18px 34px;position:relative;">'+
+        '<div style="width:84px;height:84px;border-radius:50%;margin:0 auto 14px;background:'+PAL.ring+';display:flex;align-items:center;justify-content:center;font-size:40px;box-shadow:0 10px 34px rgba(255,45,149,.5);">'+icon+'</div>'+
+        '<div style="font-size:18.5px;font-weight:900;letter-spacing:.2px;">'+title+'</div>'+
+        '<div style="font-size:12px;opacity:.82;line-height:1.65;margin-top:7px;">'+sub+'</div>'+
+      '</div>'+
+      '<div style="background:'+PAL.card+';color:#1c2542;padding:16px 16px 18px;">'+
+        (sub2?'<div style="font-size:10.5px;color:#8a93ad;line-height:1.6;margin-bottom:10px;">'+sub2+'</div>':'')+
+        '<div style="display:flex;gap:9px;">'+
+          '<button id="swExitYes" style="flex:1.15;border:none;border-radius:14px;padding:13px 6px;font-weight:900;font-size:13px;cursor:pointer;color:#fff;background:'+yesBg+';box-shadow:0 8px 22px rgba(0,0,0,.18);">'+yes+'</button>'+
+          '<button id="swExitNo" style="flex:1;border:none;border-radius:14px;padding:13px 6px;font-weight:900;font-size:13px;cursor:pointer;background:'+PAL.blu+';color:#fff;box-shadow:0 8px 22px rgba(13,110,253,.25);">'+no+'</button>'+
+        '</div>'+
+      '</div>';
+    box=el('swExitBox');
+    box.innerHTML=html;
+    box.style.background=PAL.card;
+    var bg=el('swExitBg'); if(bg) bg.style.display='flex';
+    box.style.display='block';
+    var y=el('swExitYes'), n=el('swExitNo');
+    if(y) y.onclick=function(){ try{ (cfg&&cfg.cb)(); }catch(e){ console.log(e); } hide(); };
+    if(n) n.onclick=function(){ dismiss(); };
+    return cfg;
+  }
+  function hide(){
+    var bg=el('swExitBg'); if(bg) bg.style.display='none';
+    var b=el('swExitBox'); if(b) b.style.display='none';
+  }
+  function dismiss(){ hide(); pendingExit=false; busy=null; }
+  function trap(){
+    try{
+      if(history.state&&history.state.__swg) return;
+      history.replaceState({__swg:1},'');
+      history.pushState({__swg:1},'');
+    }catch(e){}
+  }
+  function goOut(){
+    pendingExit=true; armed=false; busy=null;
+    hide();
+    setTimeout(function(){
+      try{ if(history.length>1) history.back(); }catch(e){}
+      setTimeout(function(){
+        try{ window.close(); }catch(e){}
+        setTimeout(function(){
+          if(!document.hidden){
+            ensureUI();
+            var b=el('swExitBox');
+            if(b) b.innerHTML='<div style="background:'+PAL.bg+';color:#fff;padding:26px 16px;"><div style="font-size:40px;">👋</div><div style="font-size:15px;font-weight:900;margin-top:10px;">फिर मिलेंगे!</div><div style="font-size:11px;opacity:.8;margin-top:6px;">अब आप इस tab को बंद कर सकते हैं।</div></div>';
+          }
+        },800);
+      },350);
+    },80);
+  }
+
+  /* 🔙 Android/browser back — pehle app ke kholे हुए internal page (Policy/About/Terms/modal) band */
+  window.addEventListener('popstate',function(){
+    if(!armed||pendingExit) return;
+    try{
+      var cbs=window.__exitGuardCloseables||[];
+      for(var i=0;i<cbs.length;i++){ try{ if(cbs[i]()) return; }catch(e){} }
+    }catch(e){}
+    render({icon:'🚪',title:'बाहर जाना है?',sub:'क्या आप सच में SewaAstra से बाहर जाना चाहते हैं?<br><b>रुकें</b> दबाएँ तो आप यहीं बने रहेंगे।',yes:'हाँ, बाहर जाएँ',no:'रुकें',cb:function(){ goOut(); }});
+    busy='back';
+  });
+  /* 🧾 tab close / refresh / external page */
+  window.addEventListener('beforeunload',function(e){
+    if(!armed) return;
+    if(Date.now()-silentT<1500) return;
+    e.preventDefault();
+    e.returnValue='';
+  });
+
+  window.__exitGuard={
+    armed:function(){ return armed; },
+    disarm:function(){ armed=false; },
+    rearm:function(){ armed=true; trap(); },
+    silent:function(){ silentT=Date.now(); armed=false; },
+    trap:trap,
+    askExit:function(){ render({cb:function(){ goOut(); }}); busy='back'; },
+    /* ✋ कस्टम सुंदर confirm — cb() चलेगा sirf 'हाँ' par */
+    confirmExit:function(cfg){ busy='custom'; render(cfg); return cfg; },
+    registerCloser:function(fn){ try{ window.__exitGuardCloseables=window.__exitGuardCloseables||[]; window.__exitGuardCloseables.push(fn); }catch(e){} },
+    dismiss:dismiss,
+    _modal:function(){ return _m(); }
+  };
+  try{ trap(); }catch(e){}
+  console.log('%c 🚪 EXIT GUARD v8.2 — kahi se bhi exit confirm popup ✅ ','background:linear-gradient(90deg,#e53935,#7a2bff);color:#fff;font-weight:bold;padding:3px;');
+})();
+} catch (e) { try { console.error('[SewaAstra] ब्लॉक 17 में गड़बड़:', e); (window.__SW_ERRORS = window.__SW_ERRORS || []).push([17, String(e)]); } catch (_) {} }

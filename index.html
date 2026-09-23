@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+
+
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://www.gstatic.com https://apis.google.com https://www.google.com https://cdnjs.cloudflare.com https://www.googletagmanager.com https://www.google-analytics.com; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src 'self' data: https://cdnjs.cloudflare.com https://fonts.gstatic.com; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://*.cloudfunctions.net https://*.firebaseapp.com https://*.google-analytics.com https://*.analytics.google.com https://nominatim.openstreetmap.org; frame-src 'self' https://*.firebaseapp.com https://www.google.com https://accounts.google.com https://www.youtube.com; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests">
+<meta http-equiv="X-Content-Type-Options" content="nosniff">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>SewaAstra Admin – Control Panel</title>
+<meta name="theme-color" content="#0b1220">
+<script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-firestore-compat.js"></script>
+
+
+<script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-functions-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.6.10/firebase-app-check-compat.js"></script>
+
+<link rel="stylesheet" href="style.css">
+
+<!-- ═══════ SewaAstra SECURITY CORE v1 (auto-injected) ═══════ -->
+
+
+
+<!-- ═══════ /SECURITY CORE ═══════ -->
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="lgOv">
+  <div class="lgc">
+    <div style="font-size:52px;">👨‍💼</div>
+    <h2 style="margin:10px 0 4px;font-size:20px;">SewaAstra <span style="color:var(--pr);">Admin</span></h2>
+    <div class="mut" style="margin-bottom:18px;">A→Z Control Panel • <span class="gold">⭐ PREMIUM</span></div>
+    <button class="bn" style="width:100%;padding:13px;background:#fff;color:#222;font-size:13px;border-radius:14px;display:flex;align-items:center;justify-content:center;gap:9px;" onclick="gLogin()">
+      <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" width="18" alt="G"> Google से Login
+    </button>
+    <div class="mut" style="margin-top:14px;line-height:1.7;">🔒 सिर्फ authorized admin:<br><b style="color:var(--gold);"><span title="इस Gmail से Google login करें">soo•••••••••••••<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="bb888cfbdcd6dad2d795d8d4d6">[email&#160;protected]</a></span></b></div>
+    <div id="lgE" style="color:#ff8a80;font-size:11px;font-weight:800;margin-top:10px;"></div>
+  </div>
+</div>
+
+<!-- HEADER -->
+<div class="hd">
+  <div style="font-size:22px;">👨‍💼</div>
+  <div style="flex:1;"><b>SewaAstra <span>Admin</span> <span class="gold">⭐ PREMIUM</span></b>
+  <div class="mut" id="hSub">Control Panel</div></div>
+  <button class="bn gy" onclick="refreshAll()">🔄</button>
+  <button class="bn r" onclick="lgOut()">🚪</button>
+</div>
+
+<div class="wrap">
+  <!-- DASHBOARD -->
+  <div class="sec act" id="secD"><div id="dX"></div></div>
+  <!-- ORDERS -->
+  <div class="sec" id="secO">
+    <div class="tabs" id="oTabs"></div><div id="oX"></div>
+  </div>
+  <!-- PARTNERS -->
+  <div class="sec" id="secP"><div id="trkC"></div><div id="pX"></div></div>
+  <!-- KYC -->
+  <div class="sec" id="secK"><div id="kX"></div></div>
+  <!-- MONEY -->
+  <div class="sec" id="secM"><div id="mX"></div></div>
+  <!-- GIFTS + TICKETS -->
+  <div class="sec" id="secT"><div id="tX"></div></div>
+</div>
+
+<!-- NAV -->
+<div class="nv">
+  <button class="act" onclick="tab('D',this)"><i>📊</i>Dash</button>
+  <button onclick="tab('O',this)"><i>📦</i>Orders<span class="bdg" id="bO"></span></button>
+  <button onclick="tab('P',this)"><i>🧑‍🔧</i>Partners</button>
+  <button onclick="tab('K',this)"><i>🪪</i>KYC<span class="bdg" id="bK"></span></button>
+  <button onclick="tab('M',this)"><i>💰</i>Money<span class="bdg" id="bM"></span></button>
+  <button onclick="tab('T',this)"><i>🎫</i>Support<span class="bdg" id="bT"></span></button>
+</div>
+
+<!-- DETAIL SHEET -->
+<div class="ov" id="shO"><div class="sheet" id="shX"></div></div>
+<div id="tst"></div>
+<div class="ldr" id="ldr"><div class="spin"></div></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!-- 💎 SUNDER POPUP SYSTEM v8.3 -->
+
+
+<!-- 🚪 EXIT CONFIRMATION GUARD v8.2 -->
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="script.js"></script>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a36e49615e403ca6',t:'MTc4ODcwNjIzMg=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>
